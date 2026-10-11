@@ -1,0 +1,4 @@
+how does attention work
+what is retrieval augmented generation
+cosine similarity function
+embedding model evaluation benchmarks

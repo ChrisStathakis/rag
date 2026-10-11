@@ -1,0 +1,7 @@
+Plain text notes about retrieval augmented generation.
+
+RAG combines a retriever with a generator. The retriever finds passages that
+are relevant to the query, and the generator conditions on those passages to
+produce its answer. The main advantage is that the knowledge lives in an
+external index rather than in the model weights, so it can be updated
+without retraining.

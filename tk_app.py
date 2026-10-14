@@ -783,6 +783,10 @@ class App(ctk.CTk):
                                        width=170)
         # kept for Settings/Query, not shown here -- chat uses settings top-k
         self.topk_var = ctk.StringVar(value="8")
+        self.hybrid_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(row2, text="Hybrid", variable=self.hybrid_var,
+                        width=80).grid(row=0, column=2, sticky="w",
+                                       padx=(0, 4))
         ctk.CTkButton(row2, text="Send", width=90, font=(FONT[0], 13),
                       command=self.do_send).grid(row=0, column=4, padx=(8, 0))
 
@@ -926,6 +930,13 @@ class App(ctk.CTk):
                      text_color=("gray45", "gray65")
                      ).grid(row=r, column=0, columnspan=4, sticky="w",
                             padx=PAD); r += 1
+
+        ctk.CTkCheckBox(wrap, text="Hybrid search (vector + keyword, off = vector-only)",
+                        variable=var("hybrid_search", "1"),
+                        onvalue="1", offvalue="0",
+                        command=self._on_hybrid_setting
+                        ).grid(row=r, column=0, columnspan=4, sticky="w",
+                               padx=PAD); r += 1
 
         ctk.CTkLabel(wrap, text="Terminal agents",
                      font=(FONT[0], 14, "bold")
@@ -1192,7 +1203,8 @@ class App(ctk.CTk):
         self._say(f"query: {q!r}")
         self.runner.run("query", _search, q, topk,
                         table=table,
-                        model=self.model_var.get())
+                        model=self.model_var.get(),
+                        hybrid=bool(self.hybrid_var.get()))
 
     def do_stats(self) -> None:
         self._say("stats")
@@ -1280,7 +1292,8 @@ class App(ctk.CTk):
         self._start_pending(f"working ({chat_model})")
         self.runner.run("chat", _chat, q, topk, table,
                         self.model_var.get(), provider, chat_model, api_key,
-                        list(self.conversation), rag_enabled, min_cos)
+                        list(self.conversation), rag_enabled, min_cos,
+                        bool(self.hybrid_var.get()))
 
     def _agent_question(self) -> str:
         """Question for terminal agents: box text, else last chat question."""
@@ -1995,12 +2008,32 @@ class App(ctk.CTk):
             os.environ.setdefault("OLLAMA_HOST", host)
         if vals.get("top_k", "").strip().isdigit():
             self.topk_var.set(vals["top_k"].strip())
+        try:
+            self.hybrid_var.set(vals.get("hybrid_search", "1").strip() != "0")
+        except Exception:                                # noqa: BLE001
+            pass
         if vals.get("default_provider", "") in ("ollama", "anthropic",
                                                 "openai"):
             self.provider_var.set(vals["default_provider"])
             self._sync_provider_widgets()
 
+    def _on_hybrid_setting(self) -> None:
+        """Keep the Chat-tab checkbox in sync with the Settings default."""
+        try:
+            on = self.sv["hybrid_search"].get().strip() != "0"
+        except Exception:                                # noqa: BLE001
+            return
+        try:
+            self.hybrid_var.set(on)
+        except Exception:                                # noqa: BLE001
+            pass
+
     def do_save_settings(self) -> None:
+        try:
+            self.sv["hybrid_search"].set(
+                "1" if self.hybrid_var.get() else "0")
+        except Exception:                                # noqa: BLE001
+            pass
         for k in ("chunk_size", "overlap", "top_k"):
             v = self.sv[k].get().strip()
             if not v.isdigit() or int(v) <= 0:
@@ -2426,9 +2459,14 @@ def _call(fn, kwargs: dict):
     return fn(_Args(**kwargs))
 
 
-def _retrieve(q: str, topk: int, table: str, model: str):
+def _retrieve(q: str, topk: int, table: str, model: str,
+               hybrid: bool = True):
     """Shared retrieval for Search and Ask: guards, embed, cosine search,
-    folder weights, FTS/RRF fusion. Returns (hits, meta, model_used)."""
+    folder weights, FTS/RRF fusion. Returns (hits, meta, model_used).
+
+    hybrid=False skips the FTS half entirely (vector-only), so exact-term
+    misses and missing FTS indexes behave identically: pure cosine ranking.
+    """
     table_obj = P._open_table(table)
     meta = P._meta_of(table_obj)
     if not meta.get("model_tag"):
@@ -2453,8 +2491,11 @@ def _retrieve(q: str, topk: int, table: str, model: str):
     # NOTE: no FTS-index rebuild here on purpose -- `embed` already builds it,
     # and rebuilding on every query is expensive. If the index is missing
     # (older table), _fts_search fails gracefully and we fall back to vectors.
-    fts = P._fts_search(table_obj, q, k * 3)
-    hits = P._rrf([hits, fts], k) if fts else hits[:k]
+    if hybrid:
+        fts = P._fts_search(table_obj, q, k * 3)
+        hits = P._rrf([hits, fts], k) if fts else hits[:k]
+    else:
+        hits = hits[:k]
     return hits, meta, model
 
 
@@ -2465,12 +2506,14 @@ def _fetch_job(url: str, staging: str) -> dict:
     return {"md_file": out.name}
 
 
-def _search(q: str, topk: int, table: str, model: str) -> dict:
+def _search(q: str, topk: int, table: str, model: str,
+             hybrid: bool = True) -> dict:
     """Hybrid search. Returns hits for card rendering (one log summary)."""
-    hits, meta, model = _retrieve(q, topk, table, model)
-    P.log(f"query: {q!r} -> {len(hits)} hits (cards below)")
+    hits, meta, model = _retrieve(q, topk, table, model, hybrid)
+    mode = "hybrid" if hybrid else "vector"
+    P.log(f"query: {q!r} -> {len(hits)} hits (cards below, mode={mode})")
     return {"query": q, "hits": hits, "topk": max(topk, 1),
-            "model": model, "table": table}
+            "model": model, "table": table, "hybrid": hybrid}
 
 
 _GREETINGS = frozenset({
@@ -2530,7 +2573,7 @@ def _ollama_delta(chunk) -> str:
 def _chat(q: str, topk: int, table: str, embed_model: str,
           provider: str, chat_model: str, api_key: str = "",
           history: list | None = None, rag_enabled: bool = True,
-          min_cos: float = 0.30) -> dict:
+          min_cos: float = 0.30, hybrid: bool = True) -> dict:
     """One turn of the conversation. LLM-first, RAG is a silent helper.
 
     Retrieval is attempted quietly; only hits with cosine >= min_cos are
@@ -2552,7 +2595,7 @@ def _chat(q: str, topk: int, table: str, embed_model: str,
         BUS.put("chat_stage", "searching corpus")
         try:
             hits, _meta, embed_model = _retrieve(q, min(max(topk, 1), 8),
-                                                 table, embed_model)
+                                                 table, embed_model, hybrid)
         except Exception as e:                          # noqa: BLE001
             P.log(f"chat: no corpus context ({e}) -- answering without it")
             hits = []

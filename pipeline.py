@@ -52,6 +52,9 @@ BATCH = 8
 MIN_BATCH = 2
 TRUNCATE = False
 CHARS_PER_TOKEN = 4
+EMBED_TIMEOUT = 180
+EMBED_RETRIES = 3
+CHECKPOINT_EVERY = 64
 
 # Ollama's /api/embed applies no prompt template; Qwen3 reports +1-5% retrieval
 # when the query side carries an instruction. Always English -- that is what the
@@ -105,7 +108,10 @@ def _db():
 def _client():
     _ensure_env()
     ollama = _import_ollama()
-    return ollama.Client(host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
+    return ollama.Client(
+        host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
+        timeout=EMBED_TIMEOUT,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -310,9 +316,12 @@ def embed_texts(client, model: str, texts: list[str], *, verbose: bool = False):
     """Embed a batch with truncation disabled and a bounded context.
 
     Returns (vectors, prompt_eval_counts). Raises RuntimeError on over-length
-    input (truncate=False) or persistent OOM.
+    input (truncate=False) or persistent OOM. Transient errors (timeout,
+    connection reset, 429/500) are retried EMBED_RETRIES times with backoff
+    and a halved batch instead of hanging or dying on one bad batch.
     """
     batch = BATCH
+    attempt = 0
     while True:
         try:
             resp = client.embed(
@@ -338,6 +347,23 @@ def embed_texts(client, model: str, texts: list[str], *, verbose: bool = False):
                 batch = max(MIN_BATCH, batch // 2)
                 if verbose:
                     log(f"  OOM -> retrying with batch {batch}")
+                texts = texts[:batch]
+                attempt = 0
+                continue
+            transient = any(
+                s in msg.lower()
+                for s in ("timeout", "timed out", "connection", "reset",
+                          "broken pipe", "429", "500", "502", "503", "504")
+            )
+            if transient and attempt < EMBED_RETRIES:
+                attempt += 1
+                wait = 2.0 * attempt
+                if verbose:
+                    log(f"  transient error ({msg[:120]}) -> "
+                        f"retry {attempt}/{EMBED_RETRIES} in {wait:.0f}s "
+                        f"with batch {max(MIN_BATCH, batch // 2)}")
+                time.sleep(wait)
+                batch = max(MIN_BATCH, batch // 2)
                 texts = texts[:batch]
                 continue
             raise
@@ -701,18 +727,51 @@ def cmd_embed(args) -> None:
     started = time.time()
     done = 0
     truncations = 0
+    flushed = 0
+    skipped_overlong = 0
+
+    # Pre-filter rows the server would reject outright (truncate=False).
+    # Previously a single over-long chunk aborted the whole run mid-way.
+    ok_todo: list[dict] = []
+    for r in todo:
+        try:
+            tc = int(r.get("token_count") or 0)
+        except (TypeError, ValueError):
+            tc = 0
+        if tc > NUM_CTX:
+            skipped_overlong += 1
+            truncations += 1
+            continue
+        ok_todo.append(r)
+    if skipped_overlong:
+        log(f"skipping {skipped_overlong} row(s) exceeding "
+            f"num_ctx={NUM_CTX} (truncate=False)")
+    todo = ok_todo
+    if not todo:
+        fail(f"nothing to embed: all {len(ok_todo) + skipped_overlong} pending "
+             f"rows exceed num_ctx={NUM_CTX}")
+
+    def checkpoint() -> None:
+        """Persist progress so a hang/crash loses at most one checkpoint."""
+        nonlocal flushed
+        pending = updated[flushed:]
+        if not pending:
+            return
+        _merge_rows(table, pending)
+        flushed = len(updated)
+        log(f"  checkpoint: {flushed}/{n} saved")
 
     def flush(batch_rows: list[dict]) -> int:
         """Embed one batch. Returns how many rows were actually embedded.
 
-        `embed_texts` may shrink the batch on OOM and return fewer vectors
-        than requested -- the caller re-queues the remainder instead of
-        dropping it.
+        `embed_texts` may shrink the batch on OOM/transient retry and return
+        fewer vectors than requested -- the caller re-queues the remainder
+        instead of dropping it.
         """
         nonlocal dims, done, truncations
         texts = [p["embed_input"] for p in batch_rows]
         try:
-            vecs, _ = embed_texts(client, model, texts)
+            vecs, _ = embed_texts(client, model, texts, verbose=True)
         except RuntimeError as e:
             # persist whatever we already embedded before dying
             if updated:
@@ -724,6 +783,11 @@ def cmd_embed(args) -> None:
                     pass
             fail(str(e))
         except Exception as e:                       # noqa: BLE001
+            if updated[flushed:]:
+                try:
+                    _merge_rows(table, updated[flushed:])
+                except Exception:
+                    pass
             fail(f"embedding failed after {done} rows: {e}")
 
         if dims is None:
@@ -731,9 +795,6 @@ def cmd_embed(args) -> None:
         for p, v in zip(batch_rows, vecs):
             if len(v) != dims:
                 fail(f"inconsistent vector size {len(v)} != {dims} -- aborting before corrupting the index")
-            # truncation guard: model saw fewer tokens than we sent
-            if p["token_count"] > NUM_CTX * 1.05:
-                truncations += 1
             updated.append({**p, "vector": v, "model_tag": model,
                             "dims": dims, "embedded": 1})
         done += len(vecs)
@@ -746,21 +807,27 @@ def cmd_embed(args) -> None:
         if got <= 0:
             fail("embedding made no progress -- aborting to avoid an infinite loop")
         i += got
-        if done % (BATCH * 20) < BATCH:
-            rate = done / max(1e-6, time.time() - started)
-            log(f"  {done}/{n}  ({rate:.1f} rows/s, dims={dims})")
+        rate = done / max(1e-6, time.time() - started)
+        log(f"  {done}/{n}  ({rate:.1f} rows/s, dims={dims})")
         emit_progress(min(done, n), n)
+        if len(updated) - flushed >= CHECKPOINT_EVERY:
+            try:
+                checkpoint()
+            except Exception as e:                   # noqa: BLE001
+                log(f"  checkpoint failed ({e}); continuing in memory")
     emit_progress(n, n)
 
     if not updated:
         fail("nothing embedded")
 
-    _merge_rows(table, updated)
+    if updated[flushed:]:
+        _merge_rows(table, updated[flushed:])
+    flushed = len(updated)
     log(f"\nembedded {len(updated)} rows -> dims={dims} model={model}")
     _ensure_fts_index(table)
     if truncations:
         log(f"WARNING: {truncations} rows exceed num_ctx={NUM_CTX}; they were "
-            f"rejected by the server (truncate=False) -- inspect with --verbose")
+            f"skipped before sending (truncate=False) -- inspect with --verbose")
     log(f"elapsed {time.time() - started:.1f}s")
     log("next: python pipeline.py query \"your question\"")
     return {"embedded": len(updated), "dims": dims, "model": model,
@@ -851,7 +918,9 @@ def cmd_query(args) -> None:
     else:
         hits = hits[:k]
 
-    log(f"model={model}  table={name}  dims={meta.get('dims')}  hits={len(hits)}\n")
+    mode = "hybrid" if args.hybrid else "vector"
+    log(f"model={model}  table={name}  dims={meta.get('dims')}  "
+        f"mode={mode}  hits={len(hits)}\n")
     for i, h in enumerate(hits[:k], 1):
         score = h.get("_distance")
         rel = ""
@@ -1020,10 +1089,22 @@ def cmd_eval(args) -> None:
         hits_total = 0
         ndcg_total = 0.0
         scored = 0
+        use_hybrid = bool(getattr(args, "hybrid", False))
         for qtext, gold in pairs:
             try:
                 vec, _ = embed_one(client, model, QUERY_INSTRUCT + qtext)
-                hits = table.search(vec, vector_column_name="vector").limit(10).to_list()
+                try:
+                    vhits = (table.search(vec, vector_column_name="vector")
+                             .metric("cosine").limit(30).to_list())
+                except Exception:                      # noqa: BLE001
+                    vhits = (table.search(vec, vector_column_name="vector")
+                             .limit(30).to_list())
+                vhits = apply_weights(vhits, load_weights(tname))
+                if use_hybrid:
+                    fhits = _fts_search(table, qtext, 30)
+                    hits = _rrf([vhits, fhits], 10) if fhits else vhits[:10]
+                else:
+                    hits = vhits[:10]
             except Exception as e:
                 log(f"  query failed: {e}")
                 continue
@@ -1258,6 +1339,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--model", default=None)
     g.add_argument("--top-k", type=int, default=8)
     g.add_argument("--width", type=int, default=220, help="chars of each hit to print")
+    g.add_argument("--hybrid", dest="hybrid", action="store_true",
+                   help="hybrid vector + FTS/RRF (default)")
     g.add_argument("--no-hybrid", dest="hybrid", action="store_false",
                    help="vector-only (skip the FTS/RRF half)")
     g.set_defaults(func=cmd_query, hybrid=True)
@@ -1271,7 +1354,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--gold", default="", help="csv: query,source-glob -- enables hit-rate")
     g.add_argument("--tables", default="", help="comma list (default: all)")
     g.add_argument("--out", default="", help="write results csv")
-    g.set_defaults(func=cmd_eval)
+    g.add_argument("--hybrid", action="store_true",
+                   help="score with hybrid vector + FTS/RRF (default: vector-only)")
+    g.set_defaults(func=cmd_eval, hybrid=False)
 
     g = sub.add_parser("reindex", help="new table for a different model")
     g.add_argument("--model", default=DEFAULT_MODEL)

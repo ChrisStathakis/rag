@@ -23,6 +23,14 @@ written.
 | `ingested_at` | float64 | Unix timestamp. |
 | `vector` | list<float32> | The embedding. |
 
+## Full-text index (hybrid search)
+
+`embed` builds a BM25 full-text index on `text_raw` via `_ensure_fts_index`
+after vectors are written. `query` / Chat read it for the keyword half of
+[Hybrid Search](hybrid-search.md) (vector + BM25 fused with RRF, `rr=60`).
+If the index is missing (older table, build failure), search degrades
+gracefully to vector-only — rerun `embed` to rebuild it.
+
 ## Guards
 
 Two columns exist purely to stop silent corruption.

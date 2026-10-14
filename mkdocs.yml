@@ -13,6 +13,7 @@ nav:
   - Install: install.md
   - Desktop App: gui.md
   - CLI Commands: commands.md
+  - Hybrid Search: hybrid-search.md
   - How It Works: extractors.md
   - Schema & Config: schema.md
   - Troubleshooting: troubleshooting.md

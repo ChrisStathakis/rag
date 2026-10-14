@@ -126,6 +126,10 @@ the corpus contributed.
   like "explain more simply" resolve naturally.
 - **Query** (tab 2 · Index) still exists for raw search: hits render as
   one compact list message in the conversation.
+- **Hybrid toggle.** The **Hybrid** checkbox next to **Send** switches between
+  hybrid (vector + keyword, default) and vector-only retrieval for both Query
+  and Chat. The default follows **4 · Settings → Hybrid search**. Details and
+  trade-offs: [Hybrid Search](hybrid-search.md).
 - **OpenCode** / **CmdCode** (tab 2 · Index) open a terminal with the
   agent in your first source folder and copy the question + sources.
   Require the CLIs on PATH (`opencode`, or `command-code` via

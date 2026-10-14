@@ -60,6 +60,7 @@ _SETTINGS_DEFAULTS = {
     "openai_key": "",
     "rag_enabled": "1",
     "rag_min_cos": "0.30",
+    "hybrid_search": "1",
     "opencode_cmd": "opencode",
     "commandcode_cmd": "command-code",
 }

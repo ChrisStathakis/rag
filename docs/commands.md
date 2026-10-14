@@ -74,7 +74,11 @@ Rank Fusion (RRF).
 | `--model` | Must match the table's `model_tag` — refused otherwise. |
 | `--top-k` | Number of hits to return (default 8). |
 | `--width` | Characters of each hit to print (default 220). |
+| `--hybrid` | Explicitly select hybrid (the default). |
 | `--no-hybrid` | Vector-only; skip the FTS/RRF half. |
+
+See [Hybrid Search](hybrid-search.md) for when to use which mode and how
+fusion works.
 
 ```powershell
 .\.venv\Scripts\python.exe pipeline.py query "how does attention work" --table sample
@@ -108,6 +112,7 @@ decide whether a model or chunking change actually helped.
 | `--queries` | txt/csv, one query per line (or column 0). Required. |
 | `--gold` | CSV `query,source-glob` — enables hit-rate and nDCG scoring. |
 | `--tables` | Comma list of tables (default: all). |
+| `--hybrid` | Score with hybrid vector + FTS/RRF (default: vector-only). |
 | `--out` | Write results to a CSV. |
 
 ```powershell

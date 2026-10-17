@@ -211,3 +211,33 @@ prefix removes everything under it:
 
 In the desktop app the same thing is the **Sources…** button (it lists each
 source with its chunk count and a ✕ to delete).
+
+## saved
+
+Manage a project's **saved queries** — the same list the desktop app shows in
+the **Saved:** dropdown on the Chat tab. They live in `app.db`, so this is the
+scriptable side of that feature. The project is picked by name
+(case-insensitive) or numeric id.
+
+| Sub-action | Meaning |
+|------------|---------|
+| `list` | Print the project's saved queries with their ids. |
+| `add` | Save a new query (duplicates are a no-op). |
+| `rm` | Delete one saved query by `--id`. |
+
+| Flag | Meaning |
+|------|---------|
+| `--project` | Project name or id (required). |
+| `--db` | Path to `app.db` (default: the one next to `pipeline.py`). |
+| `--id` | Saved-query id, for `rm` (see `saved list`). |
+
+```powershell
+# show the project's saved queries
+.\.venv\Scripts\python.exe pipeline.py saved list --project corpus
+
+# save a query
+.\.venv\Scripts\python.exe pipeline.py saved add --project corpus "what is RRF?"
+
+# delete one (id from 'saved list')
+.\.venv\Scripts\python.exe pipeline.py saved rm --project corpus --id 2
+```

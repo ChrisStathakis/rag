@@ -9,7 +9,9 @@ Subcommands
     stats    chunk counts by format / model / dims + on-disk size
     eval     run a CSV of queries against several tables, print a comparison
     reindex  build a new table for a different model, copying metadata
+    delete   remove a source (file or folder prefix) from a table
     export-md  convert a folder into .md sources (same extractors as ingest)
+    saved    list/add/remove a project's saved queries (app.db)
 
 Library use
 -----------
@@ -65,6 +67,7 @@ QUERY_INSTRUCT = (
 )
 
 INDEX_DIR = Path(__file__).parent / "index"
+APP_DB = Path(__file__).parent / "app.db"      # SQLite project/settings store
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 120
 CHUNK_MIN = 50
@@ -1322,6 +1325,65 @@ def cmd_delete(args) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# saved queries (app.db) -- CLI parity for the GUI's "Saved:" dropdown
+# --------------------------------------------------------------------------- #
+
+def _resolve_project(db_path: Path, key: str) -> dict:
+    """Find a project by numeric id or case-insensitive name."""
+    import store
+    projs = store.list_projects(db_path)
+    if not projs:
+        fail(f"no projects in {db_path}")
+    key = str(key).strip()
+    if key.isdigit():
+        for p in projs:
+            if int(p["id"]) == int(key):
+                return p
+    for p in projs:
+        if str(p["name"]) == key:
+            return p
+    low = key.lower()
+    for p in projs:
+        if str(p["name"]).lower() == low:
+            return p
+    fail(f"project '{key}' not found. Available: "
+         + ", ".join(str(p["name"]) for p in projs))
+
+
+def cmd_saved(args) -> None:
+    """list / add / rm saved queries for a project in app.db.
+
+    Saved queries are a GUI feature; this gives scripts the same list. The
+    project is chosen by name (case-insensitive) or numeric id. Use ``--db``
+    to point at an app.db other than the one next to this script.
+    """
+    import store
+    db = Path(args.db) if args.db else APP_DB
+    if not Path(db).exists():
+        fail(f"no database at {db} (use --db to point at app.db)")
+    store.init_db(db)
+    proj = _resolve_project(db, args.project)
+    pid = int(proj["id"])
+
+    if args.action == "list":
+        rows = store.list_saved_queries(db, pid)
+        if not rows:
+            log(f"no saved queries for '{proj['name']}'")
+            return
+        log(f"saved queries for '{proj['name']}':")
+        for r in rows:
+            log(f"  [{r['id']}] {r['query']}")
+    elif args.action == "add":
+        sid = store.add_saved_query(db, pid, args.query)
+        log(f"saved query [{sid}] for '{proj['name']}': {args.query.strip()}")
+    elif args.action == "rm":
+        store.delete_saved_query(db, args.sid)
+        log(f"deleted saved query [{args.sid}] from '{proj['name']}'")
+    else:                                                # pragma: no cover
+        fail(f"unknown saved action: {args.action}")
+
+
+# --------------------------------------------------------------------------- #
 # export-md
 # --------------------------------------------------------------------------- #
 
@@ -1474,6 +1536,26 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--source", action="append", required=True,
                    help="source path or folder/label prefix (repeatable)")
     g.set_defaults(func=cmd_delete)
+
+    g = sub.add_parser("saved", help="list/add/remove saved queries (app.db)")
+    gs = g.add_subparsers(dest="action", required=True)
+
+    def _saved_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--project", required=True,
+                        help="project name (case-insensitive) or id")
+        sp.add_argument("--db", default="",
+                        help="path to app.db (default: the one next to this script)")
+
+    s2 = gs.add_parser("list", help="show a project's saved queries")
+    _saved_common(s2)
+    s2 = gs.add_parser("add", help="save a query for a project")
+    s2.add_argument("query", help="the query text")
+    _saved_common(s2)
+    s2 = gs.add_parser("rm", help="delete a saved query by id")
+    s2.add_argument("--id", type=int, required=True, dest="sid",
+                    help="saved-query id (see 'saved list')")
+    _saved_common(s2)
+    g.set_defaults(func=cmd_saved)
 
     g = sub.add_parser("export-md", help="convert a folder into .md sources")
     g.add_argument("--src", required=True, help="folder to convert")

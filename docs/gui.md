@@ -135,7 +135,8 @@ the corpus contributed.
   the box as a per-project saved query, and the **Saved:** dropdown lists them.
   Pick one to drop it back into the box; the ✕ deletes the selected one. They
   are stored in `app.db` (`saved_queries` table) and follow the project, so each
-  RAG keeps its own shortlist. Saving the same text twice is a no-op.
+  RAG keeps its own shortlist. Saving the same text twice is a no-op. Same list
+  from the CLI: `pipeline.py saved list|add|rm --project <name|id>`.
 - **OpenCode** / **CmdCode** (tab 2 · Index) open a terminal with the
   agent in your first source folder and copy the question + sources.
   Require the CLIs on PATH (`opencode`, or `command-code` via

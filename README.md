@@ -63,6 +63,7 @@ test before pointing it at your real documents:
 | `eval`   | run a query set over one or more tables, print nDCG@10 + HitRate. `--gold` CSV enables scoring. |
 | `reindex`| build a fresh table for a *different* model (copies text + metadata, drops vectors, probes new dims). |
 | `delete` | remove one source (a file, or a whole folder/label prefix) from a table and rebuild its keyword index. `--source` repeats. |
+| `saved`  | list / add / rm a project's saved queries in `app.db` (`list` / `add` / `rm`). |
 
 ## Why these settings
 
@@ -99,7 +100,7 @@ are skipped and logged, never raised.
 ```
 extract.py    5 format handlers -> common Block(text, section, meta)
 chunking.py   prose splitter + structural code splitter -> Chunk
-pipeline.py   CLI: ingest / embed / query / stats / eval / reindex / delete / export-md
+pipeline.py   CLI: ingest / embed / query / stats / eval / reindex / delete / saved / export-md
 store.py      SQLite project store (settings only, no vectors)
 backup.py     backup/restore: full bundle (.zip) or single-project package (.zip)
 chat_providers.py  Anthropic/OpenAI backends for Ask (stdlib only)

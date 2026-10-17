@@ -320,6 +320,53 @@ class TestSavedQueryStore(unittest.TestCase):
             self.assertEqual(store.list_saved_queries(db, p2), [])
 
 
+class TestSavedQueryCli(unittest.TestCase):
+    """The `saved` subcommand is CLI parity for the GUI dropdown."""
+
+    def test_round_trip(self):
+        import types
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "app.db"
+            store.init_db(db)
+            store.create_project(db, name="Demo", table_name="corpus")
+            out: list[str] = []
+            P.set_logger(out.append)
+            try:
+                P.cmd_saved(types.SimpleNamespace(
+                    action="add", db=str(db), project="demo",
+                    query="what is cosine similarity?"))
+                P.cmd_saved(types.SimpleNamespace(
+                    action="list", db=str(db), project="Demo"))
+                rows = store.list_saved_queries(db, 1)
+                self.assertEqual(len(rows), 1)
+                P.cmd_saved(types.SimpleNamespace(
+                    action="rm", db=str(db), project="1",
+                    sid=rows[0]["id"]))
+            finally:
+                P.set_logger(None)
+            self.assertEqual(store.list_saved_queries(db, 1), [])
+            self.assertTrue(any("saved query" in m for m in out))
+            self.assertTrue(any("deleted saved query" in m for m in out))
+
+    def test_unknown_project_raises(self):
+        import types
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "app.db"
+            store.init_db(db)
+            store.create_project(db, name="Demo", table_name="corpus")
+            with self.assertRaises(P.PipelineError):
+                P.cmd_saved(types.SimpleNamespace(
+                    action="list", db=str(db), project="nope"))
+
+    def test_missing_db_raises(self):
+        import types
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "nope.db"
+            with self.assertRaises(P.PipelineError):
+                P.cmd_saved(types.SimpleNamespace(
+                    action="list", db=str(missing), project="x"))
+
+
 class TestGuiWiring(unittest.TestCase):
     """tk_app needs a display to run; verify the wiring from the source."""
 
@@ -372,6 +419,12 @@ class TestPipelineWiring(unittest.TestCase):
     def test_cli_delete_subcommand(self):
         self.assertIn('add_parser("delete"', self.src)
         self.assertIn("cmd_delete", self.src)
+
+    def test_cli_saved_subcommand(self):
+        self.assertIn('add_parser("saved"', self.src)
+        self.assertIn("cmd_saved", self.src)
+        self.assertIn('add_parser("list"', self.src)
+        self.assertIn('add_parser("rm"', self.src)
 
 
 if __name__ == "__main__":

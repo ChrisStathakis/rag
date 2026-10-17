@@ -4,6 +4,11 @@ __pycache__/
 *.pyo
 index/
 site/
+staging/
+backups/
 app.db
 *.db-journal
+*.db-wal
+*.db-shm
+*.epbackup
 .env

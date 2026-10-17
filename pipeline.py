@@ -156,6 +156,32 @@ def emit_progress(done: int, total: int) -> None:
         pass                                         # never let UI errors kill a run
 
 
+# --------------------------------------------------------------------------- #
+# cooperative cancellation -- a long run can be asked to stop between units
+# --------------------------------------------------------------------------- #
+
+_STOP = False
+STOP_MESSAGE = "stopped by user"
+
+
+def request_stop() -> None:
+    """Ask the running job to stop at the next checkpoint."""
+    global _STOP
+    _STOP = True
+
+
+def clear_stop() -> None:
+    """Reset the stop flag (call before starting a new job)."""
+    global _STOP
+    _STOP = False
+
+
+def check_stop() -> None:
+    """Raise PipelineError if a stop was requested. Cheap -- call in loops."""
+    if _STOP:
+        raise PipelineError(STOP_MESSAGE)
+
+
 def log(msg: str) -> None:
     _emit(msg)
     if _logger is not None:
@@ -522,6 +548,7 @@ def ingest_sources(
     by_kind: Counter = Counter()
 
     for fnum, (path, root, label) in enumerate(work, start=1):
+        check_stop()
         try:
             title, blocks, kind = X.extract(path, root=root)
         except Exception as e:                       # noqa: BLE001  (Skipped included)
@@ -802,19 +829,29 @@ def cmd_embed(args) -> None:
 
     n = len(todo)
     i = 0
-    while i < n:
-        got = flush(todo[i:i + BATCH])
-        if got <= 0:
-            fail("embedding made no progress -- aborting to avoid an infinite loop")
-        i += got
-        rate = done / max(1e-6, time.time() - started)
-        log(f"  {done}/{n}  ({rate:.1f} rows/s, dims={dims})")
-        emit_progress(min(done, n), n)
-        if len(updated) - flushed >= CHECKPOINT_EVERY:
+    try:
+        while i < n:
+            check_stop()
+            got = flush(todo[i:i + BATCH])
+            if got <= 0:
+                fail("embedding made no progress -- aborting to avoid an infinite loop")
+            i += got
+            rate = done / max(1e-6, time.time() - started)
+            log(f"  {done}/{n}  ({rate:.1f} rows/s, dims={dims})")
+            emit_progress(min(done, n), n)
+            if len(updated) - flushed >= CHECKPOINT_EVERY:
+                try:
+                    checkpoint()
+                except Exception as e:                   # noqa: BLE001
+                    log(f"  checkpoint failed ({e}); continuing in memory")
+    except PipelineError:
+        # persist what we already embedded before propagating a stop
+        if updated[flushed:]:
             try:
-                checkpoint()
-            except Exception as e:                   # noqa: BLE001
-                log(f"  checkpoint failed ({e}); continuing in memory")
+                _merge_rows(table, updated[flushed:])
+            except Exception:                            # noqa: BLE001
+                pass
+        raise
     emit_progress(n, n)
 
     if not updated:
@@ -1220,6 +1257,71 @@ def cmd_reindex(args) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# delete sources
+# --------------------------------------------------------------------------- #
+
+def delete_sources(table_name: str, sources: list[str]) -> dict:
+    """Remove every chunk whose `source` matches, or lives under, one of
+    `sources`.
+
+    A source naming a file (``docs/readme.md``) removes exactly that file's
+    chunks; a source naming a folder/label (``docs``) removes every file under
+    it. The FTS index is rebuilt afterwards so hybrid search stops returning
+    the removed rows. Returns {"deleted", "before", "after", "sources"}.
+    """
+    db = _db()
+    names = _table_names(db)
+    if table_name not in names:
+        fail(f"table '{table_name}' not found. Available: {', '.join(names) or '(none)'}")
+    t = db.open_table(table_name)
+
+    def _count() -> int | None:
+        try:
+            return int(t.count_rows())
+        except Exception:                                # noqa: BLE001
+            return None
+
+    before = _count()
+    removed = 0
+    for raw in sources:
+        s = str(raw).strip().replace("\\", "/")
+        if not s:
+            continue
+        esc = s.replace("'", "''")
+        try:
+            n0 = _count()
+            t.delete(f"source = '{esc}' OR source LIKE '{esc}/%'")
+            n1 = _count()
+            if n0 is not None and n1 is not None:
+                removed += max(0, n0 - n1)
+        except Exception:                                # noqa: BLE001
+            # fallback: match in Python and delete by id
+            try:
+                rows = t.search().select(["id", "source"]).to_list()
+                ids = [str(r.get("id")) for r in rows
+                       if r.get("source") == s
+                       or str(r.get("source", "")).startswith(s + "/")]
+                if ids:
+                    lst = ", ".join("'" + i.replace("'", "''") + "'" for i in ids)
+                    t.delete(f"id IN ({lst})")
+                    removed += len(ids)
+            except Exception as e:                       # noqa: BLE001
+                fail(f"could not delete '{s}': {e}")
+
+    _ensure_fts_index(t)
+    after = _count()
+    log(f"deleted {removed} chunk(s) from '{table_name}'"
+        + (f" ({before} -> {after})" if before is not None and after is not None
+           else ""))
+    return {"deleted": removed, "before": before, "after": after,
+            "sources": list(sources)}
+
+
+def cmd_delete(args) -> None:
+    delete_sources(args.table, args.source)
+
+
+# --------------------------------------------------------------------------- #
 # export-md
 # --------------------------------------------------------------------------- #
 
@@ -1265,6 +1367,7 @@ def export_markdown(src: str, dest: str, *, only: str = "") -> dict:
     written = 0
     skipped: list[str] = []
     for fnum, path in enumerate(files, start=1):
+        check_stop()
         try:
             title, blocks, kind = X.extract(path, root=root)
         except Exception as e:                       # noqa: BLE001
@@ -1365,6 +1468,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--dims", type=int, default=0, help="skip the Ollama probe, use this dimension")
     g.add_argument("--replace", action="store_true")
     g.set_defaults(func=cmd_reindex)
+
+    g = sub.add_parser("delete", help="remove a source's chunks from a table")
+    g.add_argument("--table", required=True, help="table to modify")
+    g.add_argument("--source", action="append", required=True,
+                   help="source path or folder/label prefix (repeatable)")
+    g.set_defaults(func=cmd_delete)
 
     g = sub.add_parser("export-md", help="convert a folder into .md sources")
     g.add_argument("--src", required=True, help="folder to convert")

@@ -34,6 +34,7 @@ if str(HERE) not in sys.path:
 
 import pipeline as P                                        # noqa: E402
 import store                                            # noqa: E402
+import backup                                           # noqa: E402
 
 DB_PATH = HERE / "app.db"
 STAGING_LABEL = "staging"
@@ -425,7 +426,10 @@ class Runner:
                 result = fn(*args, **kwargs)
                 BUS.put("done", result)
             except P.PipelineError as e:
-                BUS.put("failed", str(e))
+                if str(e) == P.STOP_MESSAGE:
+                    BUS.put("stopped")
+                else:
+                    BUS.put("failed", str(e))
             except Exception as e:                        # noqa: BLE001
                 BUS.put("crashed", f"{type(e).__name__}: {e}")
             finally:
@@ -433,6 +437,7 @@ class Runner:
                 P.set_progress(None)
                 BUS.put("finished")
 
+        P.clear_stop()
         P.set_logger(lambda m: BUS.put("log", m))
         P.set_progress(lambda d, t: BUS.put("progress", d, t))
         threading.Thread(target=_work, daemon=True,
@@ -478,8 +483,11 @@ class App(ctk.CTk):
         self._pending_note = ""
 
         self._build()
-        self._init_projects()
+        # settings first: defaults, then the active project may override the
+        # provider/model. Reversing this order let the global default clobber
+        # the project's saved chat provider on every startup.
         self._load_settings()
+        self._init_projects()
         self.after(80, self._drain)
         self.after(200, self.probe_ollama)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -535,12 +543,15 @@ class App(ctk.CTk):
         self.project_menu.grid(row=0, column=1, sticky="w", padx=(0, 8))
         ctk.CTkButton(frm, text="+ New", width=80, command=self.do_new_project
                       ).grid(row=0, column=2, padx=(0, 8))
+        self.btn_new_project = frm.grid_slaves(row=0, column=2)[0]
         ctk.CTkButton(frm, text="Rename", width=80, fg_color="transparent",
                       border_width=1, command=self.do_rename_project
                       ).grid(row=0, column=3, padx=(0, 8))
+        self.btn_rename_project = frm.grid_slaves(row=0, column=3)[0]
         ctk.CTkButton(frm, text="Delete", width=80, fg_color="transparent",
                       border_width=1, command=self.do_delete_project
                       ).grid(row=0, column=4)
+        self.btn_delete_project = frm.grid_slaves(row=0, column=4)[0]
 
     def _build_sources(self, parent) -> None:
         frm = ctk.CTkFrame(parent)
@@ -676,7 +687,7 @@ class App(ctk.CTk):
     def _build_actions(self, parent) -> None:
         frm = ctk.CTkFrame(parent, fg_color="transparent")
         frm.grid(row=2, column=0, sticky="ew", padx=PAD, pady=PAD)
-        for i in range(6):
+        for i in range(8):
             frm.grid_columnconfigure(i, weight=0)
 
         self.btn_ingest = ctk.CTkButton(frm, text="1 · Ingest",
@@ -687,32 +698,47 @@ class App(ctk.CTk):
                                        command=self.do_embed)
         self.btn_embed.grid(row=0, column=1, padx=(0, 8), pady=(0, 6))
 
-        ctk.CTkButton(frm, text="Query", command=self.do_query
-                      ).grid(row=0, column=2, padx=(0, 8), pady=(0, 6))
-        ctk.CTkButton(frm, text="Stats", command=self.do_stats
-                      ).grid(row=0, column=3, padx=(0, 8), pady=(0, 6))
-        ctk.CTkButton(frm, text="Re-index", fg_color="transparent",
-                      border_width=1, command=self.do_reindex
-                      ).grid(row=0, column=4, padx=(0, 8), pady=(0, 6))
-        ctk.CTkButton(frm, text="Export MD", fg_color="transparent",
-                      border_width=1, command=self.do_export_md
-                      ).grid(row=0, column=5, padx=(0, 8), pady=(0, 6))
+        self.btn_sync = ctk.CTkButton(frm, text="Sync", fg_color="transparent",
+                                      border_width=1, command=self.do_sync)
+        self.btn_sync.grid(row=0, column=2, padx=(0, 8), pady=(0, 6))
 
-        # row 1: terminal agents on their own line so they are never
-        # pushed off-screen by the pipeline buttons above.
-        ctk.CTkButton(frm, text="OpenCode", fg_color="transparent",
-                      border_width=1, command=self.do_opencode
-                      ).grid(row=1, column=0, padx=(0, 8))
-        ctk.CTkButton(frm, text="CmdCode", fg_color="transparent",
-                      border_width=1, command=self.do_commandcode
-                      ).grid(row=1, column=1, padx=(0, 8))
+        self.btn_query = ctk.CTkButton(frm, text="Query", command=self.do_query)
+        self.btn_query.grid(row=0, column=3, padx=(0, 8), pady=(0, 6))
+        self.btn_stats = ctk.CTkButton(frm, text="Stats", command=self.do_stats)
+        self.btn_stats.grid(row=0, column=4, padx=(0, 8), pady=(0, 6))
+        self.btn_reindex = ctk.CTkButton(frm, text="Re-index",
+                                         fg_color="transparent", border_width=1,
+                                         command=self.do_reindex)
+        self.btn_reindex.grid(row=0, column=5, padx=(0, 8), pady=(0, 6))
+        self.btn_export = ctk.CTkButton(frm, text="Export MD",
+                                        fg_color="transparent", border_width=1,
+                                        command=self.do_export_md)
+        self.btn_export.grid(row=0, column=6, padx=(0, 8), pady=(0, 6))
+
+        # row 1: terminal agents + source manager + stop, then progress/status
+        self.btn_opencode = ctk.CTkButton(frm, text="OpenCode",
+                                          fg_color="transparent", border_width=1,
+                                          command=self.do_opencode)
+        self.btn_opencode.grid(row=1, column=0, padx=(0, 8))
+        self.btn_commandcode = ctk.CTkButton(frm, text="CmdCode",
+                                             fg_color="transparent", border_width=1,
+                                             command=self.do_commandcode)
+        self.btn_commandcode.grid(row=1, column=1, padx=(0, 8))
+        self.btn_manage_sources = ctk.CTkButton(
+            frm, text="Sources…", fg_color="transparent", border_width=1,
+            command=self.do_manage_sources)
+        self.btn_manage_sources.grid(row=1, column=2, padx=(0, 8))
+        self.btn_stop = ctk.CTkButton(frm, text="Stop", width=70,
+                                      fg_color="transparent", border_width=1,
+                                      state="disabled", command=self.do_stop)
+        self.btn_stop.grid(row=1, column=3, padx=(0, 8))
 
         self.progress = ctk.CTkProgressBar(frm)
-        self.progress.grid(row=1, column=2, columnspan=3, sticky="ew",
+        self.progress.grid(row=1, column=4, columnspan=2, sticky="ew",
                            padx=(16, 8))
         self.progress.set(0)
         self.status_lbl = ctk.CTkLabel(frm, text="idle", width=150, anchor="w")
-        self.status_lbl.grid(row=1, column=5)
+        self.status_lbl.grid(row=1, column=6)
 
     def _build_log(self, parent) -> None:
         self.log = ctk.CTkTextbox(parent, font=FONT_MONO, wrap="none",
@@ -789,6 +815,27 @@ class App(ctk.CTk):
                                        padx=(0, 4))
         ctk.CTkButton(row2, text="Send", width=90, font=(FONT[0], 13),
                       command=self.do_send).grid(row=0, column=4, padx=(8, 0))
+
+        # saved queries -- per project; pick one to load it into the box
+        saved_row = ctk.CTkFrame(dock, fg_color="transparent")
+        saved_row.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(0, PAD))
+        saved_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(saved_row, text="Saved:", anchor="w").grid(
+            row=0, column=0, padx=(0, 6))
+        self.saved_var = ctk.StringVar(value="(none)")
+        self.saved_menu = ctk.CTkOptionMenu(
+            saved_row, variable=self.saved_var, values=["(none)"], width=280,
+            command=self._on_saved_picked)
+        self.saved_menu.grid(row=0, column=1, sticky="w", padx=(0, 6))
+        self.btn_save_query = ctk.CTkButton(
+            saved_row, text="Save current", width=110, fg_color="transparent",
+            border_width=1, command=self.do_save_query)
+        self.btn_save_query.grid(row=0, column=2, padx=(0, 6))
+        self.btn_del_query = ctk.CTkButton(
+            saved_row, text="✕", width=32, fg_color="transparent",
+            border_width=1, command=self.do_delete_saved_query)
+        self.btn_del_query.grid(row=0, column=3)
+        self._saved_map: dict[str, tuple[int, str]] = {}
 
     def _build_settings_tab(self, parent) -> None:
         wrap = ctk.CTkScrollableFrame(parent, label_text="")
@@ -869,16 +916,61 @@ class App(ctk.CTk):
                      ).grid(row=r, column=0, columnspan=4, sticky="w",
                             padx=PAD); r += 1
 
-        ctk.CTkLabel(wrap, text="Backup / Restore (JSON, settings + projects)",
+        ctk.CTkLabel(wrap, text="Backup / Transfer",
                      font=(FONT[0], 14, "bold")
                      ).grid(row=r, column=0, columnspan=4, sticky="w",
                             padx=PAD, pady=(10, 2)); r += 1
-        ctk.CTkButton(wrap, text="Backup…", width=110,
-                      command=self.do_backup).grid(row=r, column=0,
-                                                  sticky="w", padx=PAD)
-        ctk.CTkButton(wrap, text="Restore…", width=110, fg_color="transparent",
-                      border_width=1, command=self.do_restore).grid(
-            row=r, column=1, sticky="w")
+        ctk.CTkLabel(wrap, text="Full bundle (.zip): app.db + index/ + "
+                                "staging/ — move or restore everything",
+                     text_color=("gray45", "gray65"), anchor="w"
+                     ).grid(row=r, column=0, columnspan=4, sticky="w",
+                            padx=PAD); r += 1
+        self.btn_backup_zip = ctk.CTkButton(
+            wrap, text="Backup…", width=110, command=self.do_backup_zip)
+        self.btn_backup_zip.grid(row=r, column=0, sticky="w", padx=PAD)
+        self.btn_restore_zip = ctk.CTkButton(
+            wrap, text="Restore…", width=110, fg_color="transparent",
+            border_width=1, command=self.do_restore_zip)
+        self.btn_restore_zip.grid(row=r, column=1, sticky="w")
+        ctk.CTkCheckBox(wrap, text="include API keys",
+                        variable=var("backup_include_keys", "0"),
+                        onvalue="1", offvalue="0", width=140
+                        ).grid(row=r, column=2, columnspan=2, sticky="w",
+                               padx=(8, PAD))
+        r += 1
+
+        ctk.CTkLabel(wrap, text="Settings only (.json): no vectors "
+                                "(lightweight)",
+                     text_color=("gray45", "gray65"), anchor="w"
+                     ).grid(row=r, column=0, columnspan=4, sticky="w",
+                            padx=PAD); r += 1
+        self.btn_backup_json = ctk.CTkButton(
+            wrap, text="Backup…", width=110, command=self.do_backup)
+        self.btn_backup_json.grid(row=r, column=0, sticky="w", padx=PAD)
+        self.btn_restore_json = ctk.CTkButton(
+            wrap, text="Restore…", width=110, fg_color="transparent",
+            border_width=1, command=self.do_restore)
+        self.btn_restore_json.grid(row=r, column=1, sticky="w")
+        ctk.CTkButton(wrap, text="Open data folder", width=140,
+                      fg_color="transparent", border_width=1,
+                      command=self.do_open_data_folder
+                      ).grid(row=r, column=2, columnspan=2, sticky="w",
+                             padx=(8, PAD))
+        r += 1
+
+        ctk.CTkLabel(wrap, text="This project only (.zip): its vectors + "
+                                "staging, appended on import",
+                     text_color=("gray45", "gray65"), anchor="w"
+                     ).grid(row=r, column=0, columnspan=4, sticky="w",
+                            padx=PAD); r += 1
+        self.btn_export_project = ctk.CTkButton(
+            wrap, text="Export project…", width=140,
+            command=self.do_export_project)
+        self.btn_export_project.grid(row=r, column=0, sticky="w", padx=PAD)
+        self.btn_import_project = ctk.CTkButton(
+            wrap, text="Import project…", width=140, fg_color="transparent",
+            border_width=1, command=self.do_import_project)
+        self.btn_import_project.grid(row=r, column=1, sticky="w")
         r += 1
 
         ctk.CTkLabel(wrap, text="Ollama models",
@@ -1119,14 +1211,21 @@ class App(ctk.CTk):
         return specs
 
     def _save_ui_weights(self, table: str) -> None:
-        """Persist the current row weights so tweaks apply without re-ingest."""
+        """Persist the current row weights so tweaks apply without re-ingest.
+
+        Writes even when every weight is back to 1.0, otherwise a previously
+        boosted folder would keep its old multiplier in weights.json forever.
+        Skips the write when nothing changed (this runs on every query/send).
+        """
         specs = self._sources()
         if not table or not specs:
             return
         weights = {s.label: s.weight for s in specs if s.label}
-        if all(w == 1.0 for w in weights.values()):
+        if not weights:
             return
         try:
+            if P.load_weights(table) == weights:
+                return
             P.save_weights(table, weights)
             self._say(f"weights for '{table}': " + ", ".join(
                 f"{k}={v:g}" for k, v in sorted(weights.items())))
@@ -1237,6 +1336,156 @@ class App(ctk.CTk):
             return
         self._say(f"export-md: {src} -> {dest}")
         self.runner.run("export-md", P.export_markdown, src, dest)
+
+    def do_sync(self) -> None:
+        """Incremental: re-ingest (append, deduped by source) then embed."""
+        specs = self._sources()
+        if not specs:
+            messagebox.showwarning("No folders", "Add at least one existing folder.")
+            return
+        table = self.table_var.get().strip()
+        if not table:
+            messagebox.showwarning("No table", "Give the index a name.")
+            return
+        try:
+            size = int(self.size_var.get())
+            overlap = int(self.overlap_var.get())
+        except ValueError:
+            messagebox.showwarning("Bad numbers",
+                                   "Chunk size and overlap must be integers.")
+            return
+        if size <= 0:
+            messagebox.showwarning("Bad size", "Chunk size must be positive.")
+            return
+        self._save_ui_weights(table)
+        self._say(f"sync: {len(specs)} folder(s) -> table '{table}' "
+                  f"(new/changed files only)")
+        self.runner.run("sync", _sync_job, specs, table=table,
+                        model=self.model_var.get(), size=size, overlap=overlap)
+
+    def do_stop(self) -> None:
+        """Ask the running job to stop at the next safe point."""
+        if not self.runner.busy:
+            return
+        P.request_stop()
+        self._say("stop requested — finishing the current unit…")
+        try:
+            self.btn_stop.configure(state="disabled")
+        except Exception:                                # noqa: BLE001
+            pass
+
+    # -- saved queries (per project) ------------------------------------- #
+
+    def _refresh_saved_queries(self) -> None:
+        """Rebuild the saved-query dropdown for the current project."""
+        self._saved_map = {}
+        labels: list[str] = []
+        if self.project_id is not None:
+            try:
+                items = store.list_saved_queries(DB_PATH, self.project_id)
+            except Exception as e:                       # noqa: BLE001
+                self._say(f"!! cannot load saved queries: {e}")
+                items = []
+            for it in items:
+                label = _short(str(it["query"]), 48)
+                while label in self._saved_map:          # keep labels unique
+                    label += " "
+                self._saved_map[label] = (int(it["id"]), str(it["query"]))
+                labels.append(label)
+        values = ["(none)"] + labels
+        try:
+            self.saved_menu.configure(values=values)
+            self.saved_var.set("(none)")
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _on_saved_picked(self, label: str) -> None:
+        hit = self._saved_map.get(label)
+        if hit is None:
+            return
+        self.query_var.set(hit[1])
+
+    def do_save_query(self) -> None:
+        if self.project_id is None:
+            return
+        q = self.query_var.get().strip()
+        if not q:
+            messagebox.showinfo("Save query", "Type a query first.")
+            return
+        try:
+            store.add_saved_query(DB_PATH, self.project_id, q)
+        except Exception as e:                           # noqa: BLE001
+            messagebox.showerror("Save query", str(e))
+            return
+        self._say(f"saved query: {_short(q, 50)}")
+        self._refresh_saved_queries()
+
+    def do_delete_saved_query(self) -> None:
+        hit = self._saved_map.get(self.saved_var.get())
+        if hit is None:
+            messagebox.showinfo("Saved queries", "Pick a saved query first.")
+            return
+        sid, q = hit
+        if not messagebox.askyesno("Delete query", f"Delete saved query?\n\n{q}"):
+            return
+        try:
+            store.delete_saved_query(DB_PATH, sid)
+        except Exception as e:                           # noqa: BLE001
+            messagebox.showerror("Delete query", str(e))
+            return
+        self._say(f"deleted saved query: {_short(q, 50)}")
+        self._refresh_saved_queries()
+
+    def do_manage_sources(self) -> None:
+        """List the current table's sources and delete one (chunks + FTS)."""
+        table = self.table_var.get().strip()
+        if not table:
+            messagebox.showwarning("No table", "Give the index a name.")
+            return
+        try:
+            sources = _list_sources(table)
+        except P.PipelineError as e:
+            messagebox.showerror("Sources", str(e))
+            return
+        if sources is None:
+            messagebox.showinfo("Sources", f"table '{table}' has no chunks yet.")
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title(f"Sources — {table} ({len(sources)})")
+        dlg.geometry("700x480")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.grid_columnconfigure(0, weight=1)
+        dlg.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(dlg, text="Delete removes every chunk for that source and "
+                               "rebuilds the keyword index.",
+                     text_color=("gray45", "gray65"), anchor="w"
+                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+        scroll = ctk.CTkScrollableFrame(dlg, label_text="")
+        scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        scroll.grid_columnconfigure(0, weight=1)
+
+        def _del(src: str) -> None:
+            if not messagebox.askyesno(
+                    "Delete source",
+                    f"Delete all chunks for:\n{src}\n\nThis cannot be undone.",
+                    parent=dlg):
+                return
+            dlg.destroy()
+            self._say(f"delete source: {src}")
+            self.runner.run("delete-source", _delete_sources_job, table, [src])
+
+        for i, (src, count) in enumerate(sources):
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.grid(row=i, column=0, sticky="ew", pady=1)
+            row.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(row, text=f"{count:>5}  {_short(src, 70)}",
+                         anchor="w").grid(row=0, column=0, sticky="w",
+                                          padx=(4, 8))
+            ctk.CTkButton(row, text="✕", width=28, fg_color="transparent",
+                          border_width=1, command=lambda s=src: _del(s)
+                          ).grid(row=0, column=1, padx=(0, 4))
 
     def do_send(self) -> None:
         q = self.query_var.get().strip()
@@ -1361,9 +1610,15 @@ class App(ctk.CTk):
                 f"{display} not found",
                 f"The `{cmd}` CLI is not on PATH.\n{install_hint}")
             return False
+        # Pass the folder as the process working directory instead of baking it
+        # into the command string: a path containing `"` or `&` can no longer
+        # break out of the quoting (command injection).
+        folder = self._terminal_folder()
+        if not Path(folder).is_dir():
+            folder = str(HERE)
         try:
-            subprocess.Popen(["cmd", "/c", "start", "", "cmd", "/k",
-                              f'cd /d "{self._terminal_folder()}" && {cmd}'])
+            subprocess.Popen(["cmd", "/c", "start", "", "cmd", "/k", cmd],
+                             cwd=folder)
         except Exception as e:                          # noqa: BLE001
             messagebox.showerror("Launch failed", str(e))
             return False
@@ -1874,6 +2129,7 @@ class App(ctk.CTk):
         self.clear_chat()
         self._apply_project(data)
         self._refresh_staging()
+        self._refresh_saved_queries()
 
     def _on_project_picked(self, name: str) -> None:
         if self._switching_project:
@@ -1912,9 +2168,6 @@ class App(ctk.CTk):
                 chat_provider=defaults.get("default_provider", "ollama"),
                 chunk_size=defaults.get("chunk_size", "900"),
                 overlap=defaults.get("overlap", "120"))
-        except Exception as e:                          # noqa: BLE001
-            messagebox.showerror("Create failed", str(e))
-            return
         except Exception as e:                          # noqa: BLE001
             messagebox.showerror("Create failed", str(e))
             return
@@ -2154,6 +2407,162 @@ class App(ctk.CTk):
             return
         self.runner.run("delete-model", _delete_job, name)
 
+    def _include_keys(self) -> bool:
+        try:
+            return self.sv.get(
+                "backup_include_keys", ctk.StringVar(value="0")
+            ).get().strip() == "1"
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def do_backup_zip(self) -> None:
+        """Full bundle: app.db + index/ + staging/ in one .zip."""
+        self._save_current_project()
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Full backup bundle (app.db + index + staging)",
+            initialdir=str(HERE), defaultextension=".zip",
+            filetypes=[("Zip bundle", "*.zip")],
+            initialfile="embed_process-backup.zip")
+        if not path:
+            return
+        include_keys = self._include_keys()
+        self._say(f"backup bundle -> {path} "
+                  f"(API keys {'included' if include_keys else 'excluded'})")
+        self.runner.run("backup", _backup_job, path,
+                        include_staging=True, include_secrets=include_keys)
+
+    def do_restore_zip(self) -> None:
+        """Restore a full bundle, snapshotting the current data first."""
+        path = filedialog.askopenfilename(
+            parent=self, title="Restore from bundle",
+            initialdir=str(HERE), filetypes=[("Zip bundle", "*.zip")])
+        if not path:
+            return
+        try:
+            manifest = backup.read_manifest(path)
+        except backup.BackupError as e:
+            messagebox.showerror("Not a bundle", str(e))
+            return
+        counts = manifest.get("counts") or {}
+        if not messagebox.askyesno(
+                "Restore bundle?",
+                "Replace ALL current data (settings, projects, index, "
+                "staging) with this bundle?\n\n"
+                f"{counts.get('projects', 0)} project(s), "
+                f"{counts.get('tables', 0)} table(s), "
+                f"{counts.get('staging_files', 0)} staging file(s).\n"
+                f"Created: {manifest.get('created_at_readable', '?')}\n\n"
+                "A snapshot of the current data is saved to backups/ first."):
+            return
+        self.project_id = None
+        self._say(f"restoring bundle: {path}")
+        self.runner.run("restore", _restore_job, path, snapshot=True)
+
+    def _after_restore(self, summary: dict) -> None:
+        """Reload the UI against the freshly restored app.db + index."""
+        try:
+            store.init_db(DB_PATH)
+        except Exception as e:                          # noqa: BLE001
+            self._say(f"!! post-restore init failed: {e}")
+        self.project_id = None
+        self._load_settings()
+        self._refresh_project_menu()
+        projs = store.list_projects(DB_PATH)
+        if projs:
+            self._load_project(projs[0]["id"])
+        else:
+            pid = store.create_project(DB_PATH, name="My first RAG",
+                                       table_name="corpus",
+                                       embed_model=P.DEFAULT_MODEL)
+            self._refresh_project_menu(keep_id=pid)
+            self._load_project(pid)
+        self.probe_ollama()
+        self._refresh_models()
+        snap = (summary or {}).get("snapshot")
+        self._say(f"✓ restored bundle ({summary.get('projects', 0)} project(s))"
+                  + (f" — snapshot: {snap}" if snap else ""))
+
+    def do_export_project(self) -> None:
+        """Write the current project (table + staging) to its own .zip."""
+        if self.project_id is None:
+            messagebox.showinfo("Export project", "No project selected.")
+            return
+        self._save_current_project()
+        name = self.project_var.get().strip() or "project"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "project"
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Export current project",
+            initialdir=str(HERE), defaultextension=".zip",
+            filetypes=[("Project package", "*.zip")],
+            initialfile=f"project-{safe}.zip")
+        if not path:
+            return
+        self._say(f"export project '{name}' -> {path}")
+        self.runner.run("export-project", _export_project_job, path,
+                        pid=self.project_id, include_staging=True)
+
+    def do_import_project(self) -> None:
+        """Add a project package to the live data (append, never replace)."""
+        path = filedialog.askopenfilename(
+            parent=self, title="Import a project package",
+            initialdir=str(HERE), filetypes=[("Project package", "*.zip")])
+        if not path:
+            return
+        try:
+            manifest = backup.read_manifest(path)
+        except backup.BackupError as e:
+            messagebox.showerror("Not a package", str(e))
+            return
+        counts = manifest.get("counts") or {}
+        proj = manifest.get("project") or {}
+        if manifest.get("kind") != backup.PROJECT_KIND:
+            messagebox.showerror(
+                "Wrong kind",
+                "That is a full backup bundle, not a single-project package.\n"
+                "Use 'Restore…' under Full bundle instead.")
+            return
+        if not messagebox.askyesno(
+                "Import project?",
+                f"Add project '{proj.get('name', '?')}' (table "
+                f"'{proj.get('table', '?')}') to this installation?\n\n"
+                f"{counts.get('files', 0)} file(s), "
+                f"{counts.get('staging_files', 0)} staging file(s).\n"
+                "Created: " + str(manifest.get("created_at_readable", "?")) +
+                "\n\nNothing existing is overwritten — a clashing name gets "
+                "an '(imported)' suffix. A snapshot is saved to backups/ first."):
+            return
+        self._say(f"importing project: {path}")
+        self.runner.run("import-project", _import_project_job, path,
+                        snapshot=True)
+
+    def _after_project_import(self, summary: dict) -> None:
+        """Reload menus and jump to the freshly imported project."""
+        try:
+            store.init_db(DB_PATH)
+        except Exception as e:                          # noqa: BLE001
+            self._say(f"!! post-import init failed: {e}")
+        self._save_current_project()
+        self._refresh_project_menu()
+        pid = summary.get("pid")
+        if isinstance(pid, int):
+            self._load_project(pid)
+        self._refresh_staging()
+        note = ""
+        if summary.get("table_renamed"):
+            note = f" (table renamed to '{summary.get('table')}')"
+        elif summary.get("renamed"):
+            note = f" (renamed to '{summary.get('name')}')"
+        self._say(f"✓ imported project '{summary.get('name')}'{note}"
+                  + (f" — snapshot: {summary.get('snapshot')}"
+                     if summary.get("snapshot") else ""))
+
+    def do_open_data_folder(self) -> None:
+        """Open the folder holding index/, app.db and staging/."""
+        try:
+            os.startfile(str(HERE))                      # Windows
+        except Exception as e:                          # noqa: BLE001
+            messagebox.showerror("Open failed", str(e))
+
     def do_backup(self) -> None:
         self._save_current_project()
         path = filedialog.asksaveasfilename(
@@ -2245,7 +2654,8 @@ class App(ctk.CTk):
         def _work() -> None:
             host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
             try:
-                with urllib.request.urlopen(host + "/api/tags", timeout=3) as r:
+                with urllib.request.urlopen(host.rstrip("/") + "/api/tags",
+                                            timeout=3) as r:
                     data = json.load(r)
                 models = sorted(m["name"] for m in data.get("models", []))
                 BUS.put("ollama", True, models)
@@ -2263,8 +2673,38 @@ class App(ctk.CTk):
         self.log.configure(state="disabled")
 
     def set_busy(self, busy: bool) -> None:
-        for btn in (self.btn_ingest, self.btn_embed):
-            btn.configure(state="disabled" if busy else "normal")
+        """Lock the controls that would corrupt or race an in-flight job.
+
+        Only the two step buttons used to be disabled; Backup/Restore/Delete
+        stayed live, so a Restore could replace app.db while an ingest worker
+        was still writing. Every job button is now locked while busy.
+        """
+        state = "disabled" if busy else "normal"
+        for name in ("btn_ingest", "btn_embed", "btn_query", "btn_stats",
+                     "btn_reindex", "btn_export", "btn_opencode",
+                     "btn_commandcode", "btn_sync", "btn_manage_sources",
+                     "btn_new_project", "btn_rename_project",
+                     "btn_delete_project", "btn_backup_zip", "btn_restore_zip",
+                     "btn_backup_json", "btn_restore_json",
+                     "btn_export_project", "btn_import_project"):
+            btn = getattr(self, name, None)
+            if btn is None:
+                continue
+            try:
+                btn.configure(state=state)
+            except Exception:                            # noqa: BLE001
+                pass
+        # Stop is the one control that turns *on* while busy
+        stop = getattr(self, "btn_stop", None)
+        if stop is not None:
+            try:
+                stop.configure(state="normal" if busy else "disabled")
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            self.project_menu.configure(state=state)
+        except Exception:                                # noqa: BLE001
+            pass
 
     def set_progress(self, done: int, total: int, title: str = "") -> None:
         if total and total > 0:
@@ -2342,6 +2782,11 @@ class App(ctk.CTk):
             self._on_chat_token(payload[0] if payload else "")
         elif kind == "chat_stage":
             self._on_chat_stage(payload[0] if payload else "working")
+        elif kind == "stopped":
+            self._say("■ stopped by user")
+            if getattr(self, "_last_job", "") == "chat":
+                self._drop_pending_row()
+                self._append_status("stopped")
         elif kind == "failed":
             if getattr(self, "_last_job", "") == "chat":
                 self._drop_pending_row()
@@ -2363,6 +2808,41 @@ class App(ctk.CTk):
 
     def _on_done(self, result) -> None:
         if isinstance(result, dict):
+            # backup / restore jobs carry their own kind marker
+            if result.get("kind") == backup.BUNDLE_KIND:
+                counts = result.get("counts") or {}
+                self._say(f"✓ backup bundle written — {counts.get('tables', 0)} "
+                          f"table(s), {counts.get('staging_files', 0)} staging "
+                          f"file(s), keys "
+                          f"{'included' if result.get('include_secrets') else 'excluded'}")
+                messagebox.showinfo(
+                    "Backup complete",
+                    f"Bundle written:\n{result.get('path')}\n\n"
+                    f"{counts.get('projects', 0)} project(s), "
+                    f"{counts.get('tables', 0)} index table(s).")
+                return
+            if result.get("kind") == backup.PROJECT_KIND:
+                counts = result.get("counts") or {}
+                proj = result.get("project") or {}
+                self._say(f"✓ project package written — "
+                          f"{counts.get('files', 0)} file(s), "
+                          f"{counts.get('staging_files', 0)} staging file(s)")
+                messagebox.showinfo(
+                    "Export complete",
+                    f"Project '{proj.get('name', '?')}' exported to:\n"
+                    f"{result.get('path')}\n\n"
+                    f"{'with' if result.get('has_table') else 'without'} its "
+                    f"index table.")
+                return
+            if result.get("kind") == "project-import":
+                self._after_project_import(result)
+                messagebox.showinfo("Import complete",
+                                    f"Project '{result.get('name')}' imported.")
+                return
+            if result.get("kind") == "restore":
+                self._after_restore(result)
+                messagebox.showinfo("Restore complete", "Bundle restored.")
+                return
             self.last_summary = result
             if "answer" in result:
                 self.last_hits = result.get("hits", [])
@@ -2381,7 +2861,15 @@ class App(ctk.CTk):
             elif "hits" in result:
                 self.last_hits = result.get("hits", [])
                 self.last_query = result.get("query", "")
+                self.last_answer = ""          # a raw Query is not a chat answer
                 self._render_hits(result["hits"])
+            elif result.get("sync"):
+                self._say(f"✓ sync complete — {result.get('chunks', 0)} new "
+                          f"chunk(s), {result.get('embedded', 0)} embedded")
+                self.btn_embed.configure(state="normal")
+            elif "deleted_chunks" in result:
+                self._say(f"✓ deleted {result.get('deleted_chunks', 0)} chunk(s) "
+                          f"({result.get('before')} -> {result.get('after')})")
             elif "chunks" in result:
                 if result.get("appended"):
                     self._say(f"✓ ingest complete — {result['chunks']} new chunks "
@@ -2446,6 +2934,84 @@ def _delete_job(model: str) -> dict:
         raise P.PipelineError(f"delete failed: {e}")
     P.log(f"deleted '{model}'")
     return {"deleted": model}
+
+
+def _backup_job(path: str, **kw) -> dict:
+    """Write a full bundle; surface BackupError as a PipelineError."""
+    try:
+        return backup.export_bundle(path, **kw)
+    except backup.BackupError as e:
+        raise P.PipelineError(str(e))
+
+
+def _restore_job(path: str, **kw) -> dict:
+    """Restore a full bundle; surface BackupError as a PipelineError."""
+    try:
+        return backup.import_bundle(path, **kw)
+    except backup.BackupError as e:
+        raise P.PipelineError(str(e))
+
+
+def _export_project_job(path: str, **kw) -> dict:
+    """Write a single-project package; surface BackupError as a PipelineError."""
+    try:
+        return backup.export_project(path, **kw)
+    except backup.BackupError as e:
+        raise P.PipelineError(str(e))
+
+
+def _import_project_job(path: str, **kw) -> dict:
+    """Add a project package; surface BackupError as a PipelineError."""
+    try:
+        return backup.import_project(path, **kw)
+    except backup.BackupError as e:
+        raise P.PipelineError(str(e))
+
+
+def _sync_job(specs: list, *, table: str, model: str, size: int,
+              overlap: int) -> dict:
+    """Incremental sync: append-ingest (dedupes unchanged files by source
+    hash) and then embed whatever is still pending. Safe to run repeatedly.
+    """
+    P.clear_stop()
+    summary = P.ingest_sources(specs, table=table, model=model, size=size,
+                               overlap=overlap, append=True, verbose=True)
+    summary["sync"] = True
+    summary["embedded"] = 0
+    if int(summary.get("chunks") or 0):
+        res = P.cmd_embed(_Args(model=model, table=table))
+        summary["embedded"] = int(res.get("embedded") or 0)
+    return summary
+
+
+def _delete_sources_job(table: str, sources: list) -> dict:
+    """Remove a source (file or folder prefix) from a table."""
+    res = P.delete_sources(table, list(sources))
+    return {"deleted_chunks": int(res.get("deleted") or 0),
+            "before": res.get("before"), "after": res.get("after"),
+            "sources": res.get("sources")}
+
+
+def _list_sources(table: str) -> list | None:
+    """Distinct sources in `table` with their chunk counts, sorted by name.
+
+    Returns None when the table is empty. Raises PipelineError on any DB
+    error so the GUI can show a clean message.
+    """
+    from collections import Counter
+    try:
+        t = P._db().open_table(table)
+    except Exception as e:                               # noqa: BLE001
+        raise P.PipelineError(f"cannot open table '{table}': {e}")
+    try:
+        rows = t.search().select(["source"]).to_list()
+    except Exception as e:                               # noqa: BLE001
+        raise P.PipelineError(f"cannot read table '{table}': {e}")
+    if not rows:
+        return None
+    counts = Counter(str(r.get("source", "")) for r in rows)
+    return sorted(counts.items())
+
 
 class _Args:
     """Minimal stand-in for argparse.Namespace."""
@@ -2600,19 +3166,10 @@ def _chat(q: str, topk: int, table: str, embed_model: str,
             P.log(f"chat: no corpus context ({e}) -- answering without it")
             hits = []
         if hits:
-            scored = [(h, _cos_of(h)) for h in hits]
-            # keep hits without a score (e.g. FTS-only) but rank them last
-            kept = [h for h, c in scored
-                    if c is None or c >= min_cos]
-            # if every scored hit failed the threshold, use nothing
-            if kept and all(_cos_of(h) is None for h in kept) :
-                kept = kept[:_RAG_MAX_CTX]
-            elif any(c is not None and c >= min_cos for _, c in scored):
-                kept = [h for h in kept
-                        if _cos_of(h) is None or _cos_of(h) >= min_cos]
-            else:
-                kept = []
-            used = kept[:_RAG_MAX_CTX]
+            # Keep hits without a score (FTS-only rows) and any vector hit at
+            # or above the threshold; cap how many reach the prompt.
+            used = [h for h in hits
+                    if _cos_of(h) is None or _cos_of(h) >= min_cos][:_RAG_MAX_CTX]
             if not used:
                 rag_off_reason = (
                     f"no chunk above min similarity {min_cos:.2f}")

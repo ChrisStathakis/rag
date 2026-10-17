@@ -10,7 +10,7 @@ MTEB(eng,v2) 70.70 / MTEB-Code 75.41).
 ## Install
 
 ```powershell
-cd D:\christos_projects\simvoulatoras\embed_process
+cd D:\christos_projects\rag
 python -m venv .venv
 .\.venv\Scripts\pip.exe install -r requirements.txt
 ollama pull qwen3-embedding:0.6b
@@ -62,6 +62,7 @@ test before pointing it at your real documents:
 | `stats`  | chunk counts by kind/model/dims, token totals, on-disk size. |
 | `eval`   | run a query set over one or more tables, print nDCG@10 + HitRate. `--gold` CSV enables scoring. |
 | `reindex`| build a fresh table for a *different* model (copies text + metadata, drops vectors, probes new dims). |
+| `delete` | remove one source (a file, or a whole folder/label prefix) from a table and rebuild its keyword index. `--source` repeats. |
 
 ## Why these settings
 
@@ -98,8 +99,9 @@ are skipped and logged, never raised.
 ```
 extract.py    5 format handlers -> common Block(text, section, meta)
 chunking.py   prose splitter + structural code splitter -> Chunk
-pipeline.py   CLI: ingest / embed / query / stats / eval / reindex / export-md
+pipeline.py   CLI: ingest / embed / query / stats / eval / reindex / delete / export-md
 store.py      SQLite project store (settings only, no vectors)
+backup.py     backup/restore: full bundle (.zip) or single-project package (.zip)
 chat_providers.py  Anthropic/OpenAI backends for Ask (stdlib only)
 tk_app.py     CustomTkinter GUI driving the same functions (no subprocess)
 sample/       one file per format, for smoke tests
@@ -130,6 +132,11 @@ What it gives you over the CLI:
   actually have installed.
 - **Guards kept.** Re-index is explicit, and the model-mismatch check still
   refuses to search an index built with a different model.
+- **Operational extras.** **Sync** re-ingests (skipping unchanged files) and
+  embeds in one click; **Sources…** lists each source with a ✕ to delete it;
+  **Stop** cancels a long embed/ingest and keeps committed work; and the Chat
+  tab has per-project **saved queries**. **Settings → Backup / Transfer** can
+  export/import the whole installation or a single project.
 
 Steps: add folders → set table name → **1 · Ingest** → **2 · Embed** (enabled
 once ingest succeeds) → **Search**.

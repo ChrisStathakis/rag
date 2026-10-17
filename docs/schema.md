@@ -85,6 +85,28 @@ Run `stats` for your real numbers before optimizing — int8 quantization cuts
 storage 4×, and Matryoshka (MRL) truncation to 256 dims gives another 4× **if
 recall holds**. Verify with `eval` on a gold set before adopting either.
 
+## Moving an index between machines
+
+The vectors are the expensive part, so transfer them rather than re-embedding.
+There are two transfer flavours, both `.zip` with a `manifest.json` recording
+versions and per-file SHA-256, and both verified before a single byte is
+replaced:
+
+- **Full bundle** — **4 · Settings → Backup / Transfer → Full bundle**
+  (or `backup.py export_bundle`). Contains `app.db` + the whole `index/`
+  directory + `staging/`. Restoring replaces the installation and snapshots the
+  current data first, so a bad bundle cannot overwrite a working setup.
+- **Single project** — **Export project… / Import project…** in the same
+  section (or `backup.py export_project` / `import_project`). Contains one
+  project's table (`index/<table>.lance`), its `weights.json` entry, its
+  staging folder and the project row. Import **appends**: nothing is
+  overwritten, a clashing table/project name gets an `_imported` / ` (imported)`
+  suffix, and a snapshot is taken first.
+
+The `model_tag` / `dims` guards travel with the rows, so a restored table still
+refuses to be queried with the wrong model. `weights.json` (folder importance)
+lives inside `index/`, so it moves with either package too.
+
 ## Pitfalls found during implementation
 
 These are the non-obvious ones worth knowing if you modify the pipeline:

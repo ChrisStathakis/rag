@@ -17,7 +17,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_VERSION = 1
+DB_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS projects (
     table_name TEXT NOT NULL,
     embed_model TEXT NOT NULL DEFAULT '',
     chat_model TEXT NOT NULL DEFAULT '',
+    chat_provider TEXT NOT NULL DEFAULT 'ollama',
     chunk_size INTEGER NOT NULL DEFAULT 900,
     overlap INTEGER NOT NULL DEFAULT 120,
     replace_flag INTEGER NOT NULL DEFAULT 0,
@@ -46,6 +47,13 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS saved_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    query TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_saved_project ON saved_queries(project_id);
 """
 
 _SETTINGS_DEFAULTS = {
@@ -61,6 +69,7 @@ _SETTINGS_DEFAULTS = {
     "rag_enabled": "1",
     "rag_min_cos": "0.30",
     "hybrid_search": "1",
+    "backup_include_keys": "0",
     "opencode_cmd": "opencode",
     "commandcode_cmd": "command-code",
 }
@@ -71,6 +80,13 @@ def _connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(p))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL keeps readers from blocking the writer, so a stray GUI/CLI process
+    # holding the file open cannot make a save fail with "database is locked".
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.Error:                                # noqa: BLE001
+        pass
     return conn
 
 
@@ -111,15 +127,27 @@ def init_db(path: str | Path) -> None:
         conn.executescript(_SCHEMA)
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('version', ?)",
                      (str(DB_VERSION),))
-        # migrate older databases: projects gained chat_provider after v1
-        try:
-            cols = {r["name"] for r in
-                    conn.execute("PRAGMA table_info(projects)").fetchall()}
-            if "chat_provider" not in cols:
-                conn.execute("ALTER TABLE projects "
-                             "ADD COLUMN chat_provider TEXT NOT NULL DEFAULT 'ollama'")
-        except Exception:                                # noqa: BLE001
-            pass
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an older database up to the current schema.
+
+    `_SCHEMA` already defines the newest shape (``CREATE TABLE IF NOT EXISTS``
+    never alters an existing table), so this only back-fills columns added
+    after a database was first created. Each step must be idempotent.
+    """
+    try:
+        cols = {r["name"] for r in
+                conn.execute("PRAGMA table_info(projects)").fetchall()}
+        # projects gained chat_provider after the first release (v1)
+        if "chat_provider" not in cols:
+            conn.execute("ALTER TABLE projects "
+                         "ADD COLUMN chat_provider TEXT NOT NULL DEFAULT 'ollama'")
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('version', ?)",
+                     (str(DB_VERSION),))
+    except sqlite3.Error:                                # noqa: BLE001
+        pass
 
 
 def list_projects(path: str | Path) -> list[dict]:
@@ -214,6 +242,44 @@ def rename_project(path: str | Path, pid: int, name: str) -> None:
 def delete_project(path: str | Path, pid: int) -> None:
     with _session(path) as conn:
         conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
+
+
+# --------------------------------------------------------------------------- #
+# saved queries -- per project, plain text the user can re-run
+# --------------------------------------------------------------------------- #
+
+def list_saved_queries(path: str | Path, pid: int) -> list[dict]:
+    """Saved queries for a project, newest first."""
+    with _session(path) as conn:
+        rows = conn.execute(
+            "SELECT id, query, created_at FROM saved_queries "
+            "WHERE project_id = ? ORDER BY created_at DESC, id DESC",
+            (pid,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_saved_query(path: str | Path, pid: int, query: str) -> int:
+    """Save a query for a project. Idempotent: re-saving the same text
+    returns the existing row instead of creating a duplicate."""
+    q = (query or "").strip()
+    if not q:
+        raise ValueError("empty query")
+    with _session(path) as conn:
+        row = conn.execute(
+            "SELECT id FROM saved_queries WHERE project_id = ? AND query = ?",
+            (pid, q)).fetchone()
+        if row is not None:
+            return int(row["id"])
+        cur = conn.execute(
+            "INSERT INTO saved_queries(project_id, query, created_at) "
+            "VALUES (?,?,?)", (pid, q, time.time()))
+        sid = int(cur.lastrowid)
+    return sid
+
+
+def delete_saved_query(path: str | Path, sid: int) -> None:
+    with _session(path) as conn:
+        conn.execute("DELETE FROM saved_queries WHERE id = ?", (sid,))
 
 
 # --------------------------------------------------------------------------- #

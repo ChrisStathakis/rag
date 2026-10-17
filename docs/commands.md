@@ -182,3 +182,32 @@ Convert a folder into `.md` sources with the same extractors ingest uses:
 .\.venv\Scripts\python.exe pipeline.py export-md --src raw_docs --dest md_docs
 .\.venv\Scripts\python.exe pipeline.py ingest --src md_docs --table corpus --replace
 ```
+
+## delete
+
+Remove a source's chunks from a table and rebuild its keyword (FTS) index so
+hybrid search stops returning the removed rows. Nothing else in the table is
+touched — no re-embed needed for the rows that stay.
+
+| Flag | Meaning |
+|------|---------|
+| `--table` | Table to modify (required). |
+| `--source` | A `source` value or a folder/label prefix (required, repeatable). |
+
+A source is the path stored at ingest time (label folder + relative path, e.g.
+`docs/readme.md`). Deleting a file matches exactly that file; deleting a
+prefix removes everything under it:
+
+```powershell
+# drop one file
+.\.venv\Scripts\python.exe pipeline.py delete --table corpus --source docs/readme.md
+
+# drop a whole folder (every source starting with "docs/")
+.\.venv\Scripts\python.exe pipeline.py delete --table corpus --source docs
+
+# drop several at once
+.\.venv\Scripts\python.exe pipeline.py delete --table corpus --source old/a.md --source old/b.md
+```
+
+In the desktop app the same thing is the **Sources…** button (it lists each
+source with its chunk count and a ✕ to delete).

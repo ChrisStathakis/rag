@@ -99,8 +99,9 @@ lost setups.
   to a slug of the project name), `Rename` (project only — the index table
   keeps its name), `Delete` (asks whether to also drop the index table).
 - Old `projects/*.json` files are imported once automatically.
-- Move everything to another machine: copy **`app.db` + `index/`** (and
-  **`staging/`** if you want your collected notes too).
+- Move everything to another machine with **4 · Settings → Backup / Transfer →
+  Full bundle**: one `.zip` holding `app.db` + `index/` + `staging/`. Restore it
+  on the other machine (or back here) in one step.
 
 ## Chat (tab 3)
 
@@ -130,6 +131,11 @@ the corpus contributed.
   hybrid (vector + keyword, default) and vector-only retrieval for both Query
   and Chat. The default follows **4 · Settings → Hybrid search**. Details and
   trade-offs: [Hybrid Search](hybrid-search.md).
+- **Saved queries.** Under the message bar, **Save current** keeps the text of
+  the box as a per-project saved query, and the **Saved:** dropdown lists them.
+  Pick one to drop it back into the box; the ✕ deletes the selected one. They
+  are stored in `app.db` (`saved_queries` table) and follow the project, so each
+  RAG keeps its own shortlist. Saving the same text twice is a no-op.
 - **OpenCode** / **CmdCode** (tab 2 · Index) open a terminal with the
   agent in your first source folder and copy the question + sources.
   Require the CLIs on PATH (`opencode`, or `command-code` via
@@ -144,8 +150,25 @@ the corpus contributed.
 - **API keys**: Anthropic (Claude) and OpenAI (ChatGPT), masked with
   show/hide + clear. Stored in `app.db` as plaintext — fine for a local
   single-user machine, do not share the file.
-- **Backup / Restore**: one JSON with settings + all projects + weights.
-  Restore **replaces** everything (index tables are kept) after confirmation.
+- **Backup / Transfer**:
+  - **Full bundle (.zip)** — `app.db` + `index/` (all vector tables +
+    `weights.json`) + `staging/`, with a `manifest.json` (version, counts,
+    per-file SHA-256). This is the whole installation in one file. API keys
+    are **excluded by default**; tick **include API keys** to keep them.
+    **Restore** verifies every checksum, takes a **snapshot** of your current
+    data into `backups/auto-<timestamp>/`, then replaces everything.
+  - **Settings only (.json)** — the lightweight old behaviour: settings +
+    projects + folder weights, no vectors. Restore replaces settings and
+    projects (index tables are kept) after confirmation.
+  - **This project only (.zip)** — **Export project…** writes just the current
+    project (its `index/<table>.lance`, its `weights.json` entry and its
+    `staging/p<id>/`) to a `.zip`. **Import project…** **adds** it to the
+    installation; nothing is overwritten — a clashing table name becomes
+    `<table>_imported` and a clashing project name gets ` (imported)`, and a
+    snapshot is taken to `backups/` first. Use this to move a single RAG or to
+    share one index without shipping your whole `app.db`.
+  - **Open data folder** opens the directory holding `index/`, `app.db`,
+    `staging/` and `backups/`.
 - **Ollama models**: local list with sizes + Refresh; **Pull** streams
   progress to the log; **Delete** asks first (tables built with a deleted
   model stop working until you pull it again).
@@ -157,6 +180,40 @@ or Cancel. `embed` afterwards only processes the new rows.
 **Query**, **Stats**, **Re-index**, and **Export MD** are also in the toolbar.
 Re-index always asks for confirmation and opens the Embed step for the new
 table afterwards.
+
+### Sync — one-click incremental update
+
+**Sync** is the "catch up" button: re-run ingest in append mode (files whose
+`source` is already in the table are skipped, so only new or renamed files are
+chunked) and, if anything new landed, embed those rows in the same step. Run it
+after adding files to a folder you already indexed — no need to remember the
+Ingest → Embed order. It is safe to run repeatedly; when there is nothing new
+it reports `0 new chunk(s)` and stops.
+
+### Sources — delete a file or folder from the index
+
+**Sources…** opens a list of every `source` in the current table with its chunk
+count. The ✕ on a row deletes every chunk for that source and rebuilds the
+keyword (FTS) index so hybrid search stops returning it. Deleting works at two
+levels because a source is a path:
+
+- deleting `docs/readme.md` removes exactly that file's chunks;
+- deleting a label/folder prefix like `docs` removes every file under it.
+
+Same thing from the CLI:
+`pipeline.py delete --table corpus --source docs/readme.md`
+(use the folder form `--source docs` to drop a whole folder).
+
+### Stop a running job
+
+**Stop** cancels the current step at the next safe boundary (between files while
+ingest/export scans, and between embed batches). It is disabled when idle and
+turns on only while a job runs. Work already committed is kept:
+
+- `embed` flushes the rows it has already embedded before stopping, so a rerun
+  continues where it left off;
+- `ingest`/`export-md` abort before writing, so the new table is either fully
+  written or untouched.
 
 ## Export folder to Markdown
 
@@ -179,6 +236,9 @@ The app keeps the same protections as the CLI:
   errors out instead of returning nonsense. Use **Re-index** to switch models.
 - **Buttons lock while a step runs**, so you cannot start a second job on top
   of the first.
+- **Stop is cooperative.** A running job checks for a stop between units and
+  keeps whatever it already committed, so you can cancel a long embed and rerun
+  it later without losing work.
 - **One UI pump, never dies.** Every message from the worker is handled in a
   guard block — a single bad message cannot freeze the window.
 
@@ -202,6 +262,9 @@ column is what makes that resumable.
 - Index storage: `embed_process/index/` (LanceDB files, created at runtime).
 - Project settings: `embed_process/app.db` (SQLite, single file).
 - Collected notes/links: `embed_process/staging/p<id>/` (plain `.md`).
+- Auto-snapshots before a restore: `embed_process/backups/auto-<timestamp>/`
+  (the newest 5 are kept).
+- Full-bundle backup/restore lives in `backup.py` (stdlib only).
 - Table name: whatever you type in **Table**. One table per corpus; `stats`
   lists them all.
 - Tick **Replace table** only when you want to rebuild from scratch — it drops

@@ -93,11 +93,13 @@ Append / Rebuild / Cancel when the table exists).
 
 ## Chat has no model
 
-The provider selector offers Ollama (local dropdown), Claude and ChatGPT
-(free-text model + key from **4 · Settings**). For Ollama with `(no chat
-model)` showing, pull a small one: `ollama pull qwen3:0.6b` (fits next to
-the embedder on 4 GB VRAM). Sending refuses empty models/keys with a
-message instead of hanging.
+The provider selector offers Ollama (local dropdown) plus hosted providers:
+Anthropic (Claude), OpenAI (ChatGPT), OpenCode, The Grid, and **custom** (any
+OpenAI-compatible base URL). Hosted providers use a free-text model name + a
+key from **4 · Settings**. For Ollama with `(no chat model)` showing, pull a
+small one: `ollama pull qwen3:0.6b` (fits next to the embedder on 4 GB VRAM).
+Sending refuses empty models/keys (and an empty Custom base URL) with a message
+instead of hanging.
 
 ## Chat errors appear inline
 
@@ -108,7 +110,15 @@ simply answers without corpus context.
 
 ## API chat errors
 
-- `HTTP 401` — wrong or revoked key. Re-paste it in Settings → Save.
+- `HTTP 401` / `403` — wrong or revoked key. Re-paste it in Settings → Save.
+- `HTTP 402` — out of credits/balance (The Grid returns this). Top up the
+  account, then resend.
+- `HTTP 404` — the model/endpoint was not found. The Grid wants an **instrument**
+  string (`text-prime`, `code-max`), not an upstream name; OpenCode needs a
+  model served on its OpenAI/Chat-Completions surface (some are
+  responses/Anthropic/Google-only and won't work here).
+- `307`/redirects are followed automatically (The Grid uses one); you do not
+  need to change the base URL — do not append `/chat/completions` yourself.
 - `request failed` / timeouts — no network or provider outage; retry later.
   The conversation history is kept, so you can just resend.
 - Hosted models bill per token; every message re-sends the last 3

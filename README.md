@@ -103,7 +103,7 @@ chunking.py   prose splitter + structural code splitter -> Chunk
 pipeline.py   CLI: ingest / embed / query / stats / eval / reindex / delete / saved / export-md
 store.py      SQLite project store (settings only, no vectors)
 backup.py     backup/restore: full bundle (.zip) or single-project package (.zip)
-chat_providers.py  Anthropic/OpenAI backends for Ask (stdlib only)
+chat_providers.py  hosted chat backends (Anthropic/OpenAI/OpenCode/The Grid/custom)
 tk_app.py     CustomTkinter GUI driving the same functions (no subprocess)
 sample/       one file per format, for smoke tests
 index/        LanceDB storage, created at runtime
@@ -138,6 +138,11 @@ What it gives you over the CLI:
   **Stop** cancels a long embed/ingest and keeps committed work; and the Chat
   tab has per-project **saved queries**. **Settings → Backup / Transfer** can
   export/import the whole installation or a single project.
+- **Hosted chat providers.** Ask can use Ollama locally, or Anthropic,
+  OpenAI, **OpenCode** (`opencode.ai/inference/openai/v1`), **The Grid**
+  (`api.thegrid.ai/v1`, instrument strings like `text-prime`) and any
+  **custom OpenAI-compatible** endpoint. Keys live in `app.db` and are left
+  out of backups by default.
 
 Steps: add folders → set table name → **1 · Ingest** → **2 · Embed** (enabled
 once ingest succeeds) → **Search**.

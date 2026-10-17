@@ -39,6 +39,25 @@ import backup                                           # noqa: E402
 DB_PATH = HERE / "app.db"
 STAGING_LABEL = "staging"
 
+# Chat providers. "ollama" is local; the rest are hosted. All hosted ones
+# speak OpenAI Chat Completions except Anthropic, so they share one backend
+# in chat_providers.py -- only the base URL and the key differ.
+CHAT_PROVIDERS = ["ollama", "anthropic", "openai", "opencode", "thegrid",
+                  "custom"]
+PROVIDER_KEY_SETTING = {
+    "anthropic": "anthropic_key",
+    "openai": "openai_key",
+    "opencode": "opencode_key",
+    "thegrid": "thegrid_key",
+    "custom": "custom_key",
+}
+PROVIDER_MODEL_HINT = {
+    "openai": "OpenAI model, e.g. gpt-4o-mini",
+    "opencode": "OpenCode model, e.g. deepseek-v4.1-flash-free",
+    "thegrid": "Grid instrument, e.g. text-prime",
+    "custom": "model id at your endpoint",
+}
+
 # --------------------------------------------------------------------------- #
 # appearance
 # --------------------------------------------------------------------------- #
@@ -796,7 +815,7 @@ class App(ctk.CTk):
         self.provider_var = ctk.StringVar(value="ollama")
         self.provider_menu = ctk.CTkOptionMenu(
             row2, variable=self.provider_var,
-            values=["ollama", "anthropic", "openai"], width=110,
+            values=list(CHAT_PROVIDERS), width=110,
             command=self._on_provider_picked)
         self.provider_menu.grid(row=0, column=0, sticky="w", padx=(0, 4))
         self.chat_model_var = ctk.StringVar(value="")
@@ -882,7 +901,7 @@ class App(ctk.CTk):
                                                  padx=PAD)
         prov = ctk.CTkOptionMenu(wrap, variable=var("default_provider",
                                                     "ollama"),
-                                 values=["ollama", "anthropic", "openai"],
+                                 values=list(CHAT_PROVIDERS),
                                  width=140)
         prov.grid(row=r, column=1, sticky="w", padx=(0, 8))
         ctk.CTkLabel(wrap, text="Chunk / overlap / top-k").grid(
@@ -903,6 +922,17 @@ class App(ctk.CTk):
                             padx=PAD, pady=(10, 2)); r += 1
         self._key_row(wrap, r, "Anthropic (Claude)", var("anthropic_key")); r += 1
         self._key_row(wrap, r, "OpenAI (ChatGPT)", var("openai_key")); r += 1
+        self._key_row(wrap, r, "OpenCode", var("opencode_key")); r += 1
+        self._key_row(wrap, r, "The Grid", var("thegrid_key")); r += 1
+        self._key_row(wrap, r, "Custom (OpenAI-compatible)", var("custom_key"))
+        r += 1
+        ctk.CTkLabel(wrap, text="Custom base URL").grid(row=r, column=0,
+                                                        sticky="w", padx=PAD)
+        ctk.CTkEntry(wrap, textvariable=var("custom_base_url"),
+                     placeholder_text="https://host/v1  (path /chat/completions is appended)"
+                     ).grid(row=r, column=1, columnspan=3, sticky="ew",
+                            padx=(0, PAD))
+        r += 1
 
         ctk.CTkLabel(wrap, text="Data locations (fixed)",
                      font=(FONT[0], 14, "bold")
@@ -1494,6 +1524,7 @@ class App(ctk.CTk):
         provider = self.provider_var.get()
         chat_model = self._chat_model_value()
         api_key = ""
+        base_url = ""
         if provider == "ollama":
             if not chat_model or chat_model.startswith("("):
                 messagebox.showinfo(
@@ -1508,13 +1539,24 @@ class App(ctk.CTk):
                                     f"{provider} first.")
                 return
             api_key = self.sv.get(
-                "anthropic_key" if provider == "anthropic" else "openai_key",
+                PROVIDER_KEY_SETTING.get(provider, ""),
                 ctk.StringVar(value="")).get().strip()
             if not api_key:
                 messagebox.showwarning(
                     "No API key",
                     f"No {provider} key set.\nAdd it in 4 · Settings.")
                 return
+            if provider == "custom":
+                base_url = self.sv.get(
+                    "custom_base_url",
+                    ctk.StringVar(value="")).get().strip()
+                if not base_url:
+                    messagebox.showwarning(
+                        "No base URL",
+                        "Set the Custom base URL in 4 · Settings, e.g.\n"
+                        "  https://host/v1\n"
+                        "(the app appends /chat/completions).")
+                    return
         try:
             topk = int(self.topk_var.get())
         except ValueError:
@@ -1542,7 +1584,7 @@ class App(ctk.CTk):
         self.runner.run("chat", _chat, q, topk, table,
                         self.model_var.get(), provider, chat_model, api_key,
                         list(self.conversation), rag_enabled, min_cos,
-                        bool(self.hybrid_var.get()))
+                        bool(self.hybrid_var.get()), base_url)
 
     def _agent_question(self) -> str:
         """Question for terminal agents: box text, else last chat question."""
@@ -1936,9 +1978,16 @@ class App(ctk.CTk):
         self._sync_provider_widgets()
 
     def _sync_provider_widgets(self) -> None:
-        show_entry = self.provider_var.get() != "ollama"
+        provider = self.provider_var.get()
+        show_entry = provider != "ollama"
         if show_entry:
             self.chat_menu.grid_forget()
+            try:
+                self.chat_entry.configure(
+                    placeholder_text=PROVIDER_MODEL_HINT.get(
+                        provider, "type model name"))
+            except Exception:                            # noqa: BLE001
+                pass
             self.chat_entry.grid(row=0, column=1, sticky="w", padx=(0, 8))
         else:
             self.chat_entry.grid_forget()
@@ -2023,7 +2072,7 @@ class App(ctk.CTk):
         self.model_var.set(model)
         chat_model = str(data.get("chat_model", ""))
         provider = str(data.get("chat_provider", "ollama") or "ollama")
-        if provider not in ("ollama", "anthropic", "openai"):
+        if provider not in CHAT_PROVIDERS:
             provider = "ollama"
         self.provider_var.set(provider)
         self._sync_provider_widgets()
@@ -2265,8 +2314,7 @@ class App(ctk.CTk):
             self.hybrid_var.set(vals.get("hybrid_search", "1").strip() != "0")
         except Exception:                                # noqa: BLE001
             pass
-        if vals.get("default_provider", "") in ("ollama", "anthropic",
-                                                "openai"):
+        if vals.get("default_provider", "") in CHAT_PROVIDERS:
             self.provider_var.set(vals["default_provider"])
             self._sync_provider_widgets()
 
@@ -3139,14 +3187,16 @@ def _ollama_delta(chunk) -> str:
 def _chat(q: str, topk: int, table: str, embed_model: str,
           provider: str, chat_model: str, api_key: str = "",
           history: list | None = None, rag_enabled: bool = True,
-          min_cos: float = 0.30, hybrid: bool = True) -> dict:
+          min_cos: float = 0.30, hybrid: bool = True,
+          base_url: str = "") -> dict:
     """One turn of the conversation. LLM-first, RAG is a silent helper.
 
     Retrieval is attempted quietly; only hits with cosine >= min_cos are
     kept (max 4). Greetings, RAG-off, empty tables and low-similarity
     questions all fall back to a plain LLM answer -- the user never sees
-    a "no hits" error. provider is "ollama" or "anthropic"/"openai".
-    `history` is the last exchanges ([{role, content}, ...]).
+    a "no hits" error. provider is "ollama" or a hosted id (anthropic /
+    openai / opencode / thegrid / custom). `history` is the last exchanges
+    ([{role, content}, ...]). `base_url` is only used by "custom".
     Returns {"query", "answer", "hits", "from_corpus", "history", ...}.
     """
     # -- silent retrieval: best effort, never blocks the conversation -----
@@ -3257,7 +3307,8 @@ def _chat(q: str, topk: int, table: str, embed_model: str,
         try:
             text = C.complete(provider, model=chat_model, api_key=api_key,
                               system=system, user=q,
-                              history=list(history or []))
+                              history=list(history or []),
+                              base_url=base_url)
         except C.ProviderError as e:
             raise P.PipelineError(str(e))
     text = _clean_chat_text(text)

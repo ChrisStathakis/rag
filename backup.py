@@ -51,7 +51,8 @@ BUNDLE_VERSION = 1
 PROJECT_KIND = "embed_process-project"
 PROJECT_VERSION = 1
 MANIFEST_NAME = "manifest.json"
-_SECRET_KEYS = ("anthropic_key", "openai_key")
+_SECRET_KEYS = ("anthropic_key", "openai_key", "opencode_key",
+                "thegrid_key", "custom_key")
 
 
 class BackupError(RuntimeError):

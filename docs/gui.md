@@ -122,7 +122,19 @@ errors about hits. The status bar shows `grounded in N chunk(s) ✓` when
 the corpus contributed.
 
 - **Provider + model** pick who you talk to: **Ollama** (local dropdown),
-  **Claude** / **ChatGPT** (free-text model name + API key from Settings).
+  **Anthropic** (Claude), **OpenAI** (ChatGPT), **OpenCode**, **The Grid**, or
+  **custom** (any OpenAI-compatible base URL). Hosted providers use a free-text
+  model name + an API key from Settings.
+  - **OpenCode** talks to the OpenCode gateway
+    (`https://opencode.ai/inference/openai/v1`); the model is an OpenCode model
+    id, e.g. `deepseek-v4.1-flash-free`. Only models served on OpenCode's
+    OpenAI/Chat-Completions surface work here.
+  - **The Grid** talks to `https://api.thegrid.ai/v1`; the model is an
+    **instrument** string, e.g. `text-prime` or `code-max` (not an upstream
+    name like `gpt-4o`).
+  - **custom** sends to `<base URL>/chat/completions` with
+    `Authorization: Bearer <key>` — use it for LM Studio, vLLM, OpenRouter,
+    Groq, or any OpenAI-compatible endpoint.
 - Conversation history (last 3 exchanges) is always sent, so follow-ups
   like "explain more simply" resolve naturally.
 - **Query** (tab 2 · Index) still exists for raw search: hits render as
@@ -148,9 +160,11 @@ the corpus contributed.
   also read from the `OLLAMA_HOST` env var at startup.
 - **Defaults for new projects**: embed/chat model, provider, chunk size,
   overlap, top-k. Saved with **Save settings** (numbers validated).
-- **API keys**: Anthropic (Claude) and OpenAI (ChatGPT), masked with
-  show/hide + clear. Stored in `app.db` as plaintext — fine for a local
-  single-user machine, do not share the file.
+- **API keys**: Anthropic (Claude), OpenAI (ChatGPT), OpenCode, The Grid and a
+  Custom key, masked with show/hide + clear, plus a **Custom base URL** for the
+  `custom` provider (e.g. `https://host/v1`; `/chat/completions` is appended).
+  Stored in `app.db` as plaintext — fine for a local single-user machine, do
+  not share the file. API keys are **excluded from backups by default**.
 - **Backup / Transfer**:
   - **Full bundle (.zip)** — `app.db` + `index/` (all vector tables +
     `weights.json`) + `staging/`, with a `manifest.json` (version, counts,

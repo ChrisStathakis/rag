@@ -100,6 +100,25 @@ def complete(provider: str, *, model: str, api_key: str, system: str,
     raise ProviderError(f"unknown provider: {provider}")
 
 
+def test_connection(provider: str, *, model: str, api_key: str,
+                    base_url: str = "", timeout: int = 30) -> str:
+    """Live round-trip that proves key + model + base URL work.
+
+    Sends the same kind of request as a real Ask turn (so it exercises the
+    redirect handling too) but asks for a one-word answer to keep it cheap.
+    Returns a short human line on success; raises ProviderError with an
+    actionable message (401/402/404/…) on failure.
+    """
+    if provider == "ollama":
+        raise ProviderError("Ollama is local — use the Test next to Host")
+    text = complete(provider, model=model, api_key=api_key,
+                    system="You are a connection test.",
+                    user="Reply with exactly: OK",
+                    timeout=timeout, max_tokens=8, base_url=base_url)
+    snippet = " ".join(text.split())[:60]
+    return f"OK — {model} replied '{snippet}'"
+
+
 def _http_message(code: int, detail: str, url: str) -> str:
     """Turn an HTTP status into an actionable one-liner."""
     detail = (detail or "").strip()

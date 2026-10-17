@@ -11,6 +11,7 @@ Run:  python test_providers.py
 import ast
 import http.server
 import json
+import re
 import sys
 import threading
 import unittest
@@ -119,6 +120,20 @@ class TestRouting(unittest.TestCase):
         self.assertIn("credits", C._http_message(402, "x", "u"))
         self.assertIn("instrument", C._http_message(404, "x", "u"))
 
+    def test_connection_pings_the_real_path(self):
+        rec = _Recorder({"choices": [{"message": {"content": "OK"}}]})
+        C._post = rec
+        msg = C.test_connection("opencode", model="m1", api_key="k1")
+        self.assertIn("OK", msg)
+        self.assertIn("m1", msg)
+        self.assertEqual(
+            rec.calls[0][0],
+            "https://opencode.ai/inference/openai/v1/chat/completions")
+
+    def test_connection_rejects_ollama(self):
+        with self.assertRaises(C.ProviderError):
+            C.test_connection("ollama", model="m", api_key="k")
+
 
 class TestRedirect(unittest.TestCase):
     """The Grid 307s; the POST body must survive the hop."""
@@ -219,6 +234,72 @@ class TestGuiWiring(unittest.TestCase):
         self.assertIn("PROVIDER_KEY_SETTING.get(provider", self.src)
         self.assertIn("custom_base_url", self.src)
         self.assertIn("base_url: str = \"\"", self.src)   # _chat signature
+
+    def test_settings_has_a_test_button_per_provider(self):
+        self.assertIn("def do_test_provider", self.src)
+        self.assertIn("def _test_model_for", self.src)
+        self.assertIn("provider_test_lbl", self.src)
+        self.assertIn('kind == "provider_test"', self.src)
+        flat = re.sub(r"\s+", "", self.src)       # ignore wrapping
+        for prov in ("anthropic", "openai", "opencode", "thegrid", "custom"):
+            self.assertIn(f'"{prov}");r+=1', flat)
+
+
+class TestProviderTestButton(unittest.TestCase):
+    """The Settings 'Test' button, exercised off the network.
+
+    Constructing a real window needs a display; skip cleanly when there is
+    none (CI) instead of failing the suite.
+    """
+
+    def _app(self):
+        import tempfile
+        import pathlib
+        try:
+            import tk_app
+        except Exception as e:                             # noqa: BLE001
+            self.skipTest(f"GUI not available: {e}")
+        tk_app.DB_PATH = pathlib.Path(
+            tempfile.mkdtemp(prefix="ep-ptest-")) / "app.db"
+        try:
+            app = tk_app.App()
+        except Exception as e:                             # noqa: BLE001
+            self.skipTest(f"Tk not available: {e}")
+        app.update()
+        self.addCleanup(app.destroy)
+        return app
+
+    def test_missing_key_is_reported_before_anything_else(self):
+        app = self._app()
+        app.sv["opencode_key"].set("")
+        app.provider_var.set("ollama")
+        app.do_test_provider("opencode")
+        self.assertIn("no API key", app.provider_test_lbl.cget("text"))
+
+    def test_missing_model_is_reported(self):
+        app = self._app()
+        app.sv["opencode_key"].set("k")
+        app.sv["default_chat_model"].set("")
+        app.chat_entry_var.set("")
+        app.provider_var.set("ollama")
+        app.do_test_provider("opencode")
+        self.assertIn("no model", app.provider_test_lbl.cget("text"))
+
+    def test_custom_without_base_url_is_reported(self):
+        app = self._app()
+        app.sv["custom_key"].set("k")
+        app.sv["custom_base_url"].set("")
+        app.do_test_provider("custom")
+        self.assertIn("base URL", app.provider_test_lbl.cget("text"))
+
+    def test_model_resolver_prefers_the_chat_tab(self):
+        app = self._app()
+        app.sv["default_chat_model"].set("fallback")
+        app.provider_var.set("thegrid")
+        app.chat_entry_var.set("text-prime")
+        self.assertEqual(app._test_model_for("thegrid"), "text-prime")
+        app.provider_var.set("ollama")
+        self.assertEqual(app._test_model_for("thegrid"), "fallback")
 
 
 if __name__ == "__main__":

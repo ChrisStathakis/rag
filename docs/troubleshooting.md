@@ -110,6 +110,11 @@ simply answers without corpus context.
 
 ## API chat errors
 
+First stop: the **Test** button next to each key in **4 · Settings** fires one
+tiny live request and prints the result inline (green = worked, red = the
+provider's message). It tests the key, the model and — for `custom` — the base
+URL together, so a red line tells you which of the three is wrong.
+
 - `HTTP 401` / `403` — wrong or revoked key. Re-paste it in Settings → Save.
 - `HTTP 402` — out of credits/balance (The Grid returns this). Top up the
   account, then resend.

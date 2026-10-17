@@ -920,18 +920,28 @@ class App(ctk.CTk):
                      font=(FONT[0], 14, "bold")
                      ).grid(row=r, column=0, columnspan=4, sticky="w",
                             padx=PAD, pady=(10, 2)); r += 1
-        self._key_row(wrap, r, "Anthropic (Claude)", var("anthropic_key")); r += 1
-        self._key_row(wrap, r, "OpenAI (ChatGPT)", var("openai_key")); r += 1
-        self._key_row(wrap, r, "OpenCode", var("opencode_key")); r += 1
-        self._key_row(wrap, r, "The Grid", var("thegrid_key")); r += 1
-        self._key_row(wrap, r, "Custom (OpenAI-compatible)", var("custom_key"))
-        r += 1
+        self._key_row(wrap, r, "Anthropic (Claude)", var("anthropic_key"),
+                      "anthropic"); r += 1
+        self._key_row(wrap, r, "OpenAI (ChatGPT)", var("openai_key"),
+                      "openai"); r += 1
+        self._key_row(wrap, r, "OpenCode", var("opencode_key"),
+                      "opencode"); r += 1
+        self._key_row(wrap, r, "The Grid", var("thegrid_key"),
+                      "thegrid"); r += 1
+        self._key_row(wrap, r, "Custom (OpenAI-compatible)", var("custom_key"),
+                      "custom"); r += 1
         ctk.CTkLabel(wrap, text="Custom base URL").grid(row=r, column=0,
                                                         sticky="w", padx=PAD)
         ctk.CTkEntry(wrap, textvariable=var("custom_base_url"),
                      placeholder_text="https://host/v1  (path /chat/completions is appended)"
                      ).grid(row=r, column=1, columnspan=3, sticky="ew",
                             padx=(0, PAD))
+        r += 1
+        self.provider_test_lbl = ctk.CTkLabel(
+            wrap, text="", anchor="w", justify="left", wraplength=760,
+            text_color=("gray45", "gray65"))
+        self.provider_test_lbl.grid(row=r, column=0, columnspan=5, sticky="w",
+                                    padx=PAD, pady=(2, 0))
         r += 1
 
         ctk.CTkLabel(wrap, text="Data locations (fixed)",
@@ -1090,7 +1100,7 @@ class App(ctk.CTk):
             row=r, column=0, sticky="w", padx=PAD, pady=(12, PAD))
 
     def _key_row(self, parent, row: int, label: str,
-                 var: ctk.StringVar) -> None:
+                 var: ctk.StringVar, provider: str = "") -> None:
         ctk.CTkLabel(parent, text=label).grid(row=row, column=0, sticky="w",
                                               padx=PAD)
         entry = ctk.CTkEntry(parent, textvariable=var, show="•")
@@ -1103,6 +1113,11 @@ class App(ctk.CTk):
                       border_width=1,
                       command=lambda v=var: v.set("")
                       ).grid(row=row, column=3, sticky="w", padx=(4, PAD))
+        if provider:
+            ctk.CTkButton(parent, text="Test", width=64,
+                          fg_color="transparent", border_width=1,
+                          command=lambda p=provider: self.do_test_provider(p)
+                          ).grid(row=row, column=4, sticky="w", padx=(0, PAD))
 
     @staticmethod
     def _toggle_key(entry, btn) -> None:
@@ -2385,6 +2400,73 @@ class App(ctk.CTk):
         threading.Thread(target=_work, daemon=True,
                          name="ollama-test").start()
 
+    def _test_model_for(self, provider: str) -> str:
+        """Which model name the Settings 'Test' button should use.
+
+        Prefer whatever the Chat tab is pointed at for that same provider
+        (that is exactly what Send would use); otherwise fall back to the
+        default chat model from the Defaults section.
+        """
+        if self.provider_var.get() == provider:
+            m = self._chat_model_value()
+            if m and not m.startswith("("):
+                return m
+        try:
+            return self.sv["default_chat_model"].get().strip()
+        except (KeyError, AttributeError):
+            return ""
+
+    def do_test_provider(self, provider: str) -> None:
+        """Fire one tiny completion at a hosted provider.
+
+        Proves key + model + base URL end-to-end (including gateway
+        redirects). Network runs on a worker thread; the result lands in
+        `provider_test_lbl` through BUS. It reads the entry boxes as they
+        are now, so no need to Save first.
+        """
+        key = self.sv.get(PROVIDER_KEY_SETTING.get(provider, ""),
+                          ctk.StringVar(value="")).get().strip()
+        base_url = ""
+        if provider == "custom":
+            base_url = self.sv.get("custom_base_url",
+                                   ctk.StringVar(value="")).get().strip()
+        model = self._test_model_for(provider)
+
+        def _bad(msg: str) -> None:
+            self.provider_test_lbl.configure(
+                text=f"{provider}: {msg}",
+                text_color=("#c62828", "#ef9a9a"))
+
+        if not key:
+            _bad("no API key yet — paste one above, then Test.")
+            return
+        if provider == "custom" and not base_url:
+            _bad("no base URL yet — fill 'Custom base URL', then Test.")
+            return
+        if not model:
+            _bad("no model to test with — set 'Chat model' in Defaults, or "
+                 "pick this provider in Chat and type a model, then Test.")
+            return
+
+        self.provider_test_lbl.configure(
+            text=f"{provider}: testing {model}…",
+            text_color=("gray45", "gray65"))
+
+        def _work() -> None:
+            import chat_providers as C
+            try:
+                msg = C.test_connection(provider, model=model, api_key=key,
+                                        base_url=base_url)
+                BUS.put("provider_test", provider, True, msg)
+            except C.ProviderError as e:
+                BUS.put("provider_test", provider, False, str(e))
+            except Exception as e:                          # noqa: BLE001
+                BUS.put("provider_test", provider, False,
+                        f"{type(e).__name__}: {e}")
+
+        threading.Thread(target=_work, daemon=True,
+                         name=f"test-{provider}").start()
+
     def do_test_terminal(self, key: str) -> None:
         import shutil
 
@@ -2818,6 +2900,14 @@ class App(ctk.CTk):
             ok, text = payload
             self.ollama_test_lbl.configure(text=text)
             self.dot.configure(text_color="#2e7d32" if ok else "#c62828")
+        elif kind == "provider_test":
+            provider, ok, text = payload
+            lbl = getattr(self, "provider_test_lbl", None)
+            if lbl is not None:
+                lbl.configure(
+                    text=f"{provider}: {text}",
+                    text_color=("#2e7d32", "#81c784") if ok
+                    else ("#c62828", "#ef9a9a"))
         elif kind == "models_list":
             ok, payload2 = payload
             if ok:

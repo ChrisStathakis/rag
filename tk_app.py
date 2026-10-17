@@ -940,8 +940,21 @@ class App(ctk.CTk):
         self.provider_test_lbl = ctk.CTkLabel(
             wrap, text="", anchor="w", justify="left", wraplength=760,
             text_color=("gray45", "gray65"))
-        self.provider_test_lbl.grid(row=r, column=0, columnspan=5, sticky="w",
+        self.provider_test_lbl.grid(row=r, column=0, columnspan=6, sticky="w",
                                     padx=PAD, pady=(2, 0))
+        r += 1
+        self.provider_models_lbl = ctk.CTkLabel(
+            wrap, text="", anchor="w", justify="left", wraplength=760,
+            text_color=("gray45", "gray65"))
+        self.provider_models_lbl.grid(row=r, column=0, columnspan=6,
+                                      sticky="w", padx=PAD)
+        r += 1
+        self.provider_models_box = ctk.CTkTextbox(wrap, font=FONT_MONO,
+                                                  height=120,
+                                                  activate_scrollbars=True)
+        self.provider_models_box.grid(row=r, column=0, columnspan=6,
+                                      sticky="ew", padx=PAD, pady=(2, 0))
+        self.provider_models_box.configure(state="disabled")
         r += 1
 
         ctk.CTkLabel(wrap, text="Data locations (fixed)",
@@ -1117,7 +1130,11 @@ class App(ctk.CTk):
             ctk.CTkButton(parent, text="Test", width=64,
                           fg_color="transparent", border_width=1,
                           command=lambda p=provider: self.do_test_provider(p)
-                          ).grid(row=row, column=4, sticky="w", padx=(0, PAD))
+                          ).grid(row=row, column=4, sticky="w", padx=(0, 6))
+            ctk.CTkButton(parent, text="Models", width=74,
+                          fg_color="transparent", border_width=1,
+                          command=lambda p=provider: self.do_list_models(p)
+                          ).grid(row=row, column=5, sticky="w", padx=(0, PAD))
 
     @staticmethod
     def _toggle_key(entry, btn) -> None:
@@ -2467,6 +2484,69 @@ class App(ctk.CTk):
         threading.Thread(target=_work, daemon=True,
                          name=f"test-{provider}").start()
 
+    def do_list_models(self, provider: str) -> None:
+        """Fetch a provider's model/instrument list into the read-only box.
+
+        The Grid's catalog is public; the others need the key. Runs on a
+        worker thread and renders through BUS (`provider_models`). OpenCode
+        is listed from its gateway catalog (`/inference/v1/models`), not the
+        chat surface, which has no /models.
+        """
+        import chat_providers as C
+
+        key = self.sv.get(PROVIDER_KEY_SETTING.get(provider, ""),
+                          ctk.StringVar(value="")).get().strip()
+        base_url = ""
+        if provider == "custom":
+            base_url = self.sv.get("custom_base_url",
+                                   ctk.StringVar(value="")).get().strip()
+
+        def _bad(msg: str) -> None:
+            self.provider_models_lbl.configure(
+                text=f"{provider}: {msg}",
+                text_color=("#c62828", "#ef9a9a"))
+
+        if provider not in C.MODELS_PUBLIC and not key:
+            _bad("no API key yet — paste one above, then Models.")
+            return
+        if provider == "custom" and not base_url:
+            _bad("no base URL yet — fill 'Custom base URL', then Models.")
+            return
+
+        self.provider_models_lbl.configure(
+            text=f"{provider}: loading models…",
+            text_color=("gray45", "gray65"))
+
+        def _work() -> None:
+            try:
+                rows = C.list_models(provider, api_key=key, base_url=base_url)
+                BUS.put("provider_models", provider, True, rows)
+            except C.ProviderError as e:
+                BUS.put("provider_models", provider, False, str(e))
+            except Exception as e:                          # noqa: BLE001
+                BUS.put("provider_models", provider, False,
+                        f"{type(e).__name__}: {e}")
+
+        threading.Thread(target=_work, daemon=True,
+                         name=f"models-{provider}").start()
+
+    def _render_provider_models(self, provider: str, rows: list) -> None:
+        """Fill the read-only models box -- each line is a usable model id."""
+        self.provider_models_lbl.configure(
+            text=f"{provider}: {len(rows)} model(s) — copy an id into the "
+                 "Chat model box", text_color=("#2e7d32", "#81c784"))
+        box = self.provider_models_box
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        if provider == "opencode":
+            box.insert("end", "# only models on OpenCode's "
+                              "OpenAI/Chat-Completions surface work here\n")
+        for mid, name in rows:
+            box.insert("end", mid if (not name or name == mid)
+                       else f"{mid}   # {name}")
+            box.insert("end", "\n")
+        box.configure(state="disabled")
+
     def do_test_terminal(self, key: str) -> None:
         import shutil
 
@@ -2908,6 +2988,14 @@ class App(ctk.CTk):
                     text=f"{provider}: {text}",
                     text_color=("#2e7d32", "#81c784") if ok
                     else ("#c62828", "#ef9a9a"))
+        elif kind == "provider_models":
+            provider, ok, text = payload
+            if ok:
+                self._render_provider_models(provider, text)
+            else:
+                self.provider_models_lbl.configure(
+                    text=f"{provider}: {text}",
+                    text_color=("#c62828", "#ef9a9a"))
         elif kind == "models_list":
             ok, payload2 = payload
             if ok:

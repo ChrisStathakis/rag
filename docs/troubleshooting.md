@@ -96,7 +96,10 @@ Append / Rebuild / Cancel when the table exists).
 The provider selector offers Ollama (local dropdown) plus hosted providers:
 Anthropic (Claude), OpenAI (ChatGPT), OpenCode, The Grid, and **custom** (any
 OpenAI-compatible base URL). Hosted providers use a free-text model name + a
-key from **4 · Settings**. For Ollama with `(no chat model)` showing, pull a
+key from **4 · Settings**. Not sure what to type? Hit the **Models** button next
+to a provider's key: The Grid's instrument list is public (e.g. `text-prime`,
+`code-max`), the others need the key, and each line in the box is a ready-to-use
+model id. For Ollama with `(no chat model)` showing, pull a
 small one: `ollama pull qwen3:0.6b` (fits next to the embedder on 4 GB VRAM).
 Sending refuses empty models/keys (and an empty Custom base URL) with a message
 instead of hanging.
@@ -113,7 +116,9 @@ simply answers without corpus context.
 First stop: the **Test** button next to each key in **4 · Settings** fires one
 tiny live request and prints the result inline (green = worked, red = the
 provider's message). It tests the key, the model and — for `custom` — the base
-URL together, so a red line tells you which of the three is wrong.
+URL together, so a red line tells you which of the three is wrong. The
+neighbouring **Models** button lists valid model ids for that provider (The
+Grid's list is public), which is the quickest way to fix a `HTTP 404`.
 
 - `HTTP 401` / `403` — wrong or revoked key. Re-paste it in Settings → Save.
 - `HTTP 402` — out of credits/balance (The Grid returns this). Top up the

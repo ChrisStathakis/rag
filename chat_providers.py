@@ -2,7 +2,10 @@
 
 One function, stdlib only (urllib): `complete()` sends the same
 system+user prompt Ask builds for Ollama to a hosted provider and returns
-the answer text.
+the answer text. Two helpers ride the same plumbing: `test_connection()`
+(size-one round-trip for the Settings "Test" button) and `list_models()`
+(the Settings "Models" button -- it can read The Grid's public instrument
+catalog and each gateway's model list).
 
 Providers
 ---------
@@ -43,6 +46,18 @@ PROVIDERS: dict[str, str] = {
     "opencode": "https://opencode.ai/inference/openai/v1",
     "thegrid": "https://api.thegrid.ai/v1",
 }
+
+# Where each hosted provider lists its models (GET). OpenAI and Anthropic
+# need the key; The Grid's catalog is public. OpenCode's chat surface has no
+# /models, but its gateway catalog lives one path up (hence the different
+# URL below). `custom` uses <base_url>/models.
+MODELS_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1/models",
+    "opencode": "https://opencode.ai/inference/v1/models",
+    "thegrid": "https://api.thegrid.ai/v1/models",
+    "anthropic": "https://api.anthropic.com/v1/models",
+}
+MODELS_PUBLIC = ("thegrid",)        # no API key required to list
 
 DEFAULT_TIMEOUT = 120
 DEFAULT_MAX_TOKENS = 1024
@@ -119,6 +134,72 @@ def test_connection(provider: str, *, model: str, api_key: str,
     return f"OK — {model} replied '{snippet}'"
 
 
+def _model_items(data) -> list:
+    """Dig a model array out of whatever shape a gateway returns."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("data", "models", "items", "result"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict):
+                inner = _model_items(v)
+                if inner:
+                    return inner
+    return []
+
+
+def list_models(provider: str, *, api_key: str = "", base_url: str = "",
+                timeout: int = 30) -> list[tuple[str, str]]:
+    """Fetch a provider's model/instrument catalog -- [(id, name), ...].
+
+    Raises ProviderError (same actionable messages as chat) on failure.
+    The Grid's catalog is public; the others need the key.
+    """
+    key = (api_key or "").strip()
+    headers = {"User-Agent": "embed_process"}
+    if provider == "anthropic":
+        url = MODELS_URLS["anthropic"]
+        headers.update({"x-api-key": key,
+                        "anthropic-version": ANTHROPIC_VERSION})
+    elif provider == "custom":
+        base = (base_url or "").strip().rstrip("/")
+        if not base:
+            raise ProviderError("no base URL set -- fill it in Settings")
+        url = f"{base}/models"
+        headers["Authorization"] = f"Bearer {key}"
+    elif provider in MODELS_URLS:
+        url = MODELS_URLS[provider]
+        headers["Authorization"] = f"Bearer {key}"
+    else:
+        raise ProviderError(f"unknown provider: {provider}")
+
+    if provider not in MODELS_PUBLIC and not key:
+        raise ProviderError("no API key -- set it in Settings")
+
+    data = _as_json(_request("GET", url, headers, None, timeout), "provider")
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for it in _model_items(data):
+        if isinstance(it, str):
+            mid, name = it, ""
+        elif isinstance(it, dict):
+            mid = it.get("id") or it.get("name") or it.get("model") \
+                or it.get("slug") or ""
+            name = str(it.get("name") or it.get("canonical_slug") or "")
+        else:
+            continue
+        mid = str(mid).strip()
+        if mid and mid not in seen:
+            seen.add(mid)
+            out.append((mid, name.strip()))
+    if not out:
+        raise ProviderError("no models returned")
+    out.sort(key=lambda t: t[0])
+    return out
+
+
 def _http_message(code: int, detail: str, url: str) -> str:
     """Turn an HTTP status into an actionable one-liner."""
     detail = (detail or "").strip()
@@ -135,15 +216,20 @@ def _http_message(code: int, detail: str, url: str) -> str:
     return f"HTTP {code}: {detail or 'request failed'}"
 
 
-def _post(url: str, headers: dict, payload: dict, timeout: int) -> dict:
-    """POST JSON, following 3xx manually so the POST body is preserved."""
-    data = json.dumps(payload).encode("utf-8")
+def _request(method: str, url: str, headers: dict,
+             body: "bytes | None", timeout: int) -> str:
+    """One HTTP call, following 3xx manually so a POST stays a POST.
+
+    urllib refuses to re-POST on 307/308 and downgrades 301/302/303 to a
+    GET, which The Grid's redirect would break, so we follow 3xx ourselves
+    and hand back the decoded body.
+    """
     for _hop in range(MAX_REDIRECTS + 1):
-        req = urllib.request.Request(url, data=data, headers=headers,
-                                     method="POST")
+        req = urllib.request.Request(url, data=body, headers=headers,
+                                     method=method)
         try:
             with _OPENER.open(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8"))
+                return r.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             try:
                 if e.code in _REDIRECT_CODES:
@@ -164,6 +250,19 @@ def _post(url: str, headers: dict, payload: dict, timeout: int) -> dict:
         except Exception as e:                           # noqa: BLE001
             raise ProviderError(f"request failed: {e}")
     raise ProviderError("too many redirects")
+
+
+def _as_json(raw: str, what: str):
+    try:
+        return json.loads(raw)
+    except Exception:                                    # noqa: BLE001
+        raise ProviderError(f"bad JSON from {what}")
+
+
+def _post(url: str, headers: dict, payload: dict, timeout: int) -> dict:
+    """POST JSON -- shared by every chat backend."""
+    body = json.dumps(payload).encode("utf-8")
+    return _as_json(_request("POST", url, headers, body, timeout), "provider")
 
 
 def _anthropic(model: str, key: str, system: str, user: str,

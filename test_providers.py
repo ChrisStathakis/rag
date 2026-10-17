@@ -135,6 +135,92 @@ class TestRouting(unittest.TestCase):
             C.test_connection("ollama", model="m", api_key="k")
 
 
+class TestListModels(unittest.TestCase):
+    """`list_models` routing + tolerant parsing, all offline."""
+
+    def setUp(self):
+        self._orig = C._request
+
+    def tearDown(self):
+        C._request = self._orig
+
+    def _stub(self, payload):
+        calls: list[tuple] = []
+
+        def fake(method, url, headers, body, timeout):
+            calls.append((method, url, dict(headers), body))
+            return json.dumps(payload)
+
+        C._request = fake
+        return calls
+
+    def test_openai_url_headers_and_shape(self):
+        calls = self._stub({"data": [{"id": "gpt-4o-mini"}]})
+        rows = C.list_models("openai", api_key="k1")
+        self.assertEqual(rows, [("gpt-4o-mini", "")])
+        method, url, h, body = calls[0]
+        self.assertEqual((method, url),
+                         ("GET", "https://api.openai.com/v1/models"))
+        self.assertEqual(h["Authorization"], "Bearer k1")
+        self.assertIsNone(body)
+
+    def test_opencode_uses_the_gateway_catalog(self):
+        calls = self._stub({"data": [{"id": "deepseek-v4.1-flash-free"}]})
+        C.list_models("opencode", api_key="k1")
+        self.assertEqual(calls[0][1],
+                         "https://opencode.ai/inference/v1/models")
+
+    def test_anthropic_headers(self):
+        calls = self._stub({"data": [{"id": "claude-3-5-sonnet"}]})
+        C.list_models("anthropic", api_key="k1")
+        _m, url, h, _b = calls[0]
+        self.assertEqual(url, "https://api.anthropic.com/v1/models")
+        self.assertEqual(h["x-api-key"], "k1")
+        self.assertEqual(h["anthropic-version"], C.ANTHROPIC_VERSION)
+
+    def test_thegrid_is_public_and_ids_are_instruments(self):
+        payload = {"object": "list", "data": [
+            {"id": "text-prime", "name": "The Grid: Text Prime"},
+            {"id": "code-max", "name": "The Grid: Code Max"}]}
+        calls = self._stub(payload)
+        rows = C.list_models("thegrid")              # no key needed
+        self.assertEqual(rows, [("code-max", "The Grid: Code Max"),
+                                ("text-prime", "The Grid: Text Prime")])
+        self.assertEqual(calls[0][1], "https://api.thegrid.ai/v1/models")
+
+    def test_custom_uses_the_base_url(self):
+        calls = self._stub(["m-a", "m-b"])
+        rows = C.list_models("custom", api_key="k", base_url="https://h/v1/")
+        self.assertEqual(rows, [("m-a", ""), ("m-b", "")])
+        self.assertEqual(calls[0][1], "https://h/v1/models")
+
+    def test_tolerates_other_shapes(self):
+        self._stub({"models": [{"model": "x"}]})
+        self.assertEqual(C.list_models("openai", api_key="k"), [("x", "")])
+
+    def test_key_required_except_for_thegrid(self):
+        self._stub({"data": [{"id": "x"}]})
+        with self.assertRaises(C.ProviderError):
+            C.list_models("openai")
+        with self.assertRaises(C.ProviderError):
+            C.list_models("opencode")
+        C.list_models("thegrid")                     # public: no raise
+
+    def test_custom_requires_base_url(self):
+        self._stub(["x"])
+        with self.assertRaises(C.ProviderError):
+            C.list_models("custom", api_key="k")
+
+    def test_empty_catalog_raises(self):
+        self._stub({"data": []})
+        with self.assertRaises(C.ProviderError):
+            C.list_models("openai", api_key="k")
+
+    def test_unknown_provider(self):
+        with self.assertRaises(C.ProviderError):
+            C.list_models("nope")
+
+
 class TestRedirect(unittest.TestCase):
     """The Grid 307s; the POST body must survive the hop."""
 
@@ -178,6 +264,40 @@ class TestRedirect(unittest.TestCase):
         self.assertEqual(out["choices"][0]["message"]["content"], "ok")
         self.assertEqual(seen["path"], "/final")
         self.assertEqual(json.loads(seen["body"]), {"a": 1})
+
+    def test_307_is_followed_on_get_too(self):
+        seen: dict = {}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path == "/redirect":
+                    self.send_response(307)
+                    self.send_header("Location", "/final")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                seen["path"] = self.path
+                payload = b'{"data": [{"id": "m"}]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{srv.server_port}/redirect"
+            raw = C._request("GET", url, {}, None, timeout=5)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        self.assertEqual(seen["path"], "/final")
+        self.assertEqual(json.loads(raw)["data"][0]["id"], "m")
 
 
 class TestConfig(unittest.TestCase):
@@ -244,6 +364,15 @@ class TestGuiWiring(unittest.TestCase):
         for prov in ("anthropic", "openai", "opencode", "thegrid", "custom"):
             self.assertIn(f'"{prov}");r+=1', flat)
 
+    def test_settings_has_a_models_button(self):
+        self.assertIn("def do_list_models", self.src)
+        self.assertIn("def _render_provider_models", self.src)
+        self.assertIn("provider_models_box", self.src)
+        self.assertIn("provider_models_lbl", self.src)
+        self.assertIn('kind == "provider_models"', self.src)
+        flat = re.sub(r"\s+", "", self.src)
+        self.assertIn("self.do_list_models(p)", flat)
+
 
 class TestProviderTestButton(unittest.TestCase):
     """The Settings 'Test' button, exercised off the network.
@@ -300,6 +429,29 @@ class TestProviderTestButton(unittest.TestCase):
         self.assertEqual(app._test_model_for("thegrid"), "text-prime")
         app.provider_var.set("ollama")
         self.assertEqual(app._test_model_for("thegrid"), "fallback")
+
+    def test_models_button_warns_without_a_key(self):
+        app = self._app()
+        app.sv["openai_key"].set("")
+        app.do_list_models("openai")
+        self.assertIn("no API key", app.provider_models_lbl.cget("text"))
+
+    def test_models_button_warns_without_base_url(self):
+        app = self._app()
+        app.sv["custom_key"].set("k")
+        app.sv["custom_base_url"].set("")
+        app.do_list_models("custom")
+        self.assertIn("base URL", app.provider_models_lbl.cget("text"))
+
+    def test_models_render_lists_ids_and_names(self):
+        app = self._app()
+        app._render_provider_models("thegrid", [("text-prime", "Text Prime"),
+                                                ("code-max", "")])
+        text = app.provider_models_box.get("1.0", "end")
+        self.assertIn("text-prime", text)
+        self.assertIn("# Text Prime", text)
+        self.assertIn("code-max", text)
+        self.assertIn("2 model(s)", app.provider_models_lbl.cget("text"))
 
 
 if __name__ == "__main__":

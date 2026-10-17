@@ -163,11 +163,17 @@ the corpus contributed.
 - **API keys**: Anthropic (Claude), OpenAI (ChatGPT), OpenCode, The Grid and a
   Custom key, masked with show/hide + clear, plus a **Custom base URL** for the
   `custom` provider (e.g. `https://host/v1`; `/chat/completions` is appended).
-  Each key row has a **Test** button that fires one tiny completion to prove the
-  key + model + base URL work (it reads the boxes as typed, so you can test
-  before saving). It uses the model the Chat tab is pointed at for that
-  provider, else **Defaults → Chat model**; errors are shown inline
-  (`HTTP 401`, `HTTP 402`, `HTTP 404`, …).
+  Each key row has:
+  - **Test** — fires one tiny completion to prove the key + model + base URL
+    work (it reads the boxes as typed, so you can test before saving). It uses
+    the model the Chat tab is pointed at for that provider, else **Defaults →
+    Chat model**; errors show inline (`HTTP 401`, `HTTP 402`, `HTTP 404`, …).
+  - **Models** — lists the provider's models into a read-only box (one `id`
+    per line, with a `# name` comment). **The Grid's instrument catalog is
+    public** (17 entries at the time of writing, e.g. `text-prime`,
+    `code-max`); the rest need the key. OpenCode is read from its gateway
+    catalog (`/inference/v1/models`), not its chat surface. Copy an id into
+    the Chat model box.
   Stored in `app.db` as plaintext — fine for a local single-user machine, do
   not share the file. API keys are **excluded from backups by default**.
 - **Backup / Transfer**:

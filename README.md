@@ -142,8 +142,9 @@ What it gives you over the CLI:
   OpenAI, **OpenCode** (`opencode.ai/inference/openai/v1`), **The Grid**
   (`api.thegrid.ai/v1`, instrument strings like `text-prime`) and any
   **custom OpenAI-compatible** endpoint. Each key in Settings has a **Test**
-  button that proves key + model in one live request. Keys live in `app.db`
-  and are left out of backups by default.
+  button that proves key + model in one live request, and a **Models** button
+  that lists the provider's model ids (The Grid's instrument catalog is
+  public). Keys live in `app.db` and are left out of backups by default.
 
 Steps: add folders → set table name → **1 · Ingest** → **2 · Embed** (enabled
 once ingest succeeds) → **Search**.

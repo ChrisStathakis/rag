@@ -74,6 +74,20 @@ checkbox. Set chunk size/overlap before hitting Ingest.
 The progress bar and log stream from the worker thread, so the window never
 freezes. The button label shows `title done/total` while running.
 
+### Jobs queue — the window stays usable
+
+Starting a job while one is already running no longer refuses or locks anything:
+the second job is **queued** and starts by itself when the current one finishes.
+So during a long `embed` you can keep working — switch RAG projects, edit
+sources, run **Stats** — and line up the next step.
+
+- **Switching projects mid-job is safe.** A job binds its table and model when
+  you start it, so changing project cannot retarget it.
+- If a job finishes *after* you switched, its answer/hits are **not** pasted
+  into the project you moved to; the log reports it instead
+  (`finished for another project`).
+- **Stop (N)** shows how many jobs are waiting behind the current one.
+
 ### Ollama status
 
 The dot in the status bar shows whether the Ollama daemon is reachable, and the
@@ -241,8 +255,9 @@ Same thing from the CLI:
 ### Stop a running job
 
 **Stop** cancels the current step at the next safe boundary (between files while
-ingest/export scans, and between embed batches). It is disabled when idle and
-turns on only while a job runs. Work already committed is kept:
+ingest/export scans, and between embed batches) **and drops everything queued
+behind it**. It is disabled when idle and turns on only while a job runs; when
+jobs are waiting it reads **Stop (2)**. Work already committed is kept:
 
 - `embed` flushes the rows it has already embedded before stopping, so a rerun
   continues where it left off;
@@ -268,8 +283,10 @@ The app keeps the same protections as the CLI:
 
 - **Model mismatch is refused.** Searching a 0.6 b index with the 4 b model
   errors out instead of returning nonsense. Use **Re-index** to switch models.
-- **Buttons lock while a step runs**, so you cannot start a second job on top
-  of the first.
+- **One job at a time.** Starting another step **queues** it rather than running
+  it in parallel: `log()` / progress / Stop are process-wide, so two live
+  workers would tangle their output. The queue is what keeps the window usable
+  during a long job.
 - **Stop is cooperative.** A running job checks for a stop between units and
   keeps whatever it already committed, so you can cancel a long embed and rerun
   it later without losing work.

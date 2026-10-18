@@ -416,29 +416,65 @@ def fetch_link(url: str, staging: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 class Runner:
-    """Runs a pipeline callable on a worker thread, routing output to the UI.
+    """Runs pipeline callables **one at a time** on a worker thread, routing
+    output to the UI.
 
-    The pipeline's `log()` and progress hook are pointed at this object for
-    the duration of the run, then restored, so CLI stdout still works and the
-    GUI gets the same text.
+    Jobs are queued: `run()` enqueues and returns at once, so a long embed no
+    longer freezes the window -- you can switch projects and line up the next
+    step, which starts by itself when the current one finishes. Serial
+    execution is deliberate: `pipeline.log()` / `set_progress()` / `stop()` are
+    module-level globals, so two live workers would clobber each other's log
+    routing and Stop.
+
+    Each job records the project + table it was queued for, so a result that
+    lands *after* the user switched projects is reported in the log instead of
+    being rendered into the wrong project's chat (`App._on_done`).
     """
 
     def __init__(self, app: "App") -> None:
         self.app = app
+        self._queue: list[tuple] = []     # (title, fn, args, kwargs, ctx)
         self._busy = False
+        self._current: str | None = None
 
     @property
     def busy(self) -> bool:
         return self._busy
 
+    @property
+    def current(self) -> str | None:
+        """Title of the running job, or None when idle."""
+        return self._current
+
+    @property
+    def pending(self) -> int:
+        """How many jobs are waiting behind the current one."""
+        return len(self._queue)
+
     def run(self, title: str, fn, *args, **kwargs) -> None:
+        """Queue a job: starts now when idle, else waits its turn."""
+        # Capture the project/table *now*. The args are already bound by
+        # value, so a later project switch cannot retarget this job.
+        ctx = {"title": title, "pid": self.app.project_id,
+               "table": self.app.table_var.get().strip()}
+        self._queue.append((title, fn, args, kwargs, ctx))
         if self._busy:
-            messagebox.showwarning("Busy", "Another step is still running.")
+            self.app._say(f"queued: {title} — {len(self._queue)} waiting")
+            self.app._update_queue_badge()
             return
+        self._start_next()
+
+    def _start_next(self) -> None:
+        if not self._queue:
+            return
+        title, fn, args, kwargs, ctx = self._queue.pop(0)
         self._busy = True
+        self._current = title
         self.app._last_job = title       # lets chat errors render inline
+        self.app._job_ctx = ctx          # read by _on_done for tagging
         self.app.set_busy(True)
         self.app.set_progress(0, 1, title)
+        self.app._update_queue_badge()
 
         def _work() -> None:
             try:
@@ -463,7 +499,27 @@ class Runner:
                          name=f"pipeline-{title}").start()
 
     def finish(self) -> None:
+        """The current job ended: start the next one, or go idle."""
         self._busy = False
+        self._current = None
+        if self._queue:
+            self._start_next()
+            return
+        self.app.set_busy(False)
+        self.app.set_progress(1, 1, "idle")
+        try:
+            # Embed is enabled by a completed ingest, so keep doing it here.
+            self.app.btn_embed.configure(state="normal")
+        except Exception:                                # noqa: BLE001
+            pass
+        self.app._update_queue_badge()
+
+    def clear_queue(self) -> int:
+        """Drop the waiting jobs (Stop). Returns how many were dropped."""
+        n = len(self._queue)
+        self._queue.clear()
+        self.app._update_queue_badge()
+        return n
 
 
 # --------------------------------------------------------------------------- #
@@ -487,6 +543,7 @@ class App(ctk.CTk):
         self.last_query = ""
         self.last_answer = ""
         self._last_job = ""
+        self._job_ctx: dict = {}          # project/table of the running job
         self.chat_models: list[str] = []
         self._history: list = []                    # chat rows, oldest first
         self.conversation: list[dict] = []          # multi-turn memory
@@ -747,7 +804,7 @@ class App(ctk.CTk):
             frm, text="Sources…", fg_color="transparent", border_width=1,
             command=self.do_manage_sources)
         self.btn_manage_sources.grid(row=1, column=2, padx=(0, 8))
-        self.btn_stop = ctk.CTkButton(frm, text="Stop", width=70,
+        self.btn_stop = ctk.CTkButton(frm, text="Stop", width=88,
                                       fg_color="transparent", border_width=1,
                                       state="disabled", command=self.do_stop)
         self.btn_stop.grid(row=1, column=3, padx=(0, 8))
@@ -1499,11 +1556,13 @@ class App(ctk.CTk):
                         model=self.model_var.get(), size=size, overlap=overlap)
 
     def do_stop(self) -> None:
-        """Ask the running job to stop at the next safe point."""
+        """Stop the running job and drop anything queued behind it."""
         if not self.runner.busy:
             return
         P.request_stop()
-        self._say("stop requested — finishing the current unit…")
+        dropped = self.runner.clear_queue()
+        self._say("stop requested — finishing the current unit…"
+                  + (f" ({dropped} queued job(s) dropped)" if dropped else ""))
         try:
             self.btn_stop.configure(state="disabled")
         except Exception:                                # noqa: BLE001
@@ -2958,36 +3017,34 @@ class App(ctk.CTk):
         self.log.configure(state="disabled")
 
     def set_busy(self, busy: bool) -> None:
-        """Lock the controls that would corrupt or race an in-flight job.
+        """Toggle Stop while a job runs; leave everything else clickable.
 
-        Only the two step buttons used to be disabled; Backup/Restore/Delete
-        stayed live, so a Restore could replace app.db while an ingest worker
-        was still writing. Every job button is now locked while busy.
+        This used to disable every job button and the project switcher, because
+        a second click would have raced the first job. `Runner` now *queues*
+        whatever you start, so nothing runs concurrently and you can keep
+        working -- even switch projects -- during a long embed. Only Stop needs
+        a state.
         """
-        state = "disabled" if busy else "normal"
-        for name in ("btn_ingest", "btn_embed", "btn_query", "btn_stats",
-                     "btn_reindex", "btn_export", "btn_opencode",
-                     "btn_commandcode", "btn_sync", "btn_manage_sources",
-                     "btn_new_project", "btn_rename_project",
-                     "btn_delete_project", "btn_backup_zip", "btn_restore_zip",
-                     "btn_backup_json", "btn_restore_json",
-                     "btn_export_project", "btn_import_project", "btn_index"):
-            btn = getattr(self, name, None)
-            if btn is None:
-                continue
-            try:
-                btn.configure(state=state)
-            except Exception:                            # noqa: BLE001
-                pass
-        # Stop is the one control that turns *on* while busy
         stop = getattr(self, "btn_stop", None)
         if stop is not None:
             try:
                 stop.configure(state="normal" if busy else "disabled")
             except Exception:                            # noqa: BLE001
                 pass
+        self._update_queue_badge()
+
+    def _update_queue_badge(self) -> None:
+        """Show how many jobs are waiting, on the Stop button.
+
+        A queue only exists while a job runs, and Stop is the one control that
+        is live then -- so it is the natural place for the count.
+        """
+        stop = getattr(self, "btn_stop", None)
+        if stop is None:
+            return
         try:
-            self.project_menu.configure(state=state)
+            n = self.runner.pending
+            stop.configure(text=f"Stop ({n})" if n else "Stop")
         except Exception:                                # noqa: BLE001
             pass
 
@@ -3102,10 +3159,10 @@ class App(ctk.CTk):
             else:
                 messagebox.showerror("Unexpected error", payload[0])
         elif kind == "finished":
+            # finish() either starts the next queued job or goes idle, and it
+            # owns the unlock -- resetting the UI here would unlock the window
+            # while the next job is already running.
             self.runner.finish()
-            self.set_busy(False)
-            self.set_progress(1, 1, "idle")
-            self.btn_embed.configure(state="normal")
 
     def _on_done(self, result) -> None:
         if isinstance(result, dict):
@@ -3145,7 +3202,17 @@ class App(ctk.CTk):
                 messagebox.showinfo("Restore complete", "Bundle restored.")
                 return
             self.last_summary = result
+            ctx = getattr(self, "_job_ctx", None) or {}
+            # A job queued for another project must not paint into this one:
+            # the user switched projects while it ran, so log it instead of
+            # dropping the answer/hits into the wrong chat or card pane.
+            foreign = (ctx.get("pid") is not None
+                       and ctx.get("pid") != self.project_id)
             if "answer" in result:
+                if foreign:
+                    self._say(f"✓ '{ctx.get('title')}' finished for another "
+                              f"project — result not shown here")
+                    return
                 self.last_hits = result.get("hits", [])
                 self.last_query = result.get("query", "")
                 self.last_answer = result.get("answer", "")
@@ -3160,6 +3227,11 @@ class App(ctk.CTk):
                     self.status_lbl.configure(
                         text="general answer (RAG skipped)")
             elif "hits" in result:
+                if foreign:
+                    self._say(f"✓ query finished for another project — "
+                              f"{len(result.get('hits') or [])} hit(s) not "
+                              f"shown here")
+                    return
                 self.last_hits = result.get("hits", [])
                 self.last_query = result.get("query", "")
                 self.last_answer = ""          # a raw Query is not a chat answer

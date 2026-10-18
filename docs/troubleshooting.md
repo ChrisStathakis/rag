@@ -117,6 +117,22 @@ vectors it is rarely worth it. If you do build one, keep `refine` at query time
 `nprobes` / `refine factor` in **Settings** are ignored until an ANN index
 exists — that is expected, not a bug.
 
+## I switched project during a long job
+
+That is supported. Jobs **queue**: the running one keeps going (with the table
+and model it was started with) and the next one starts when it finishes. You can
+switch RAG projects, edit sources and check **Stats** while an embed runs.
+
+Two consequences worth knowing:
+
+- A chat answer or Query result that arrives *after* you switched is **not**
+  pasted into the project you moved to — the log says `finished for another
+  project`. Switch back to see it, or just re-run the query there.
+- The queue is **one job deep at a time on purpose**: `log()`, the progress bar
+  and Stop are process-wide, so parallel workers would mix their output. If you
+  want to abandon everything, **Stop (2)** cancels the running job *and* drops
+  the queued ones.
+
 ## Chat has no model
 
 The provider selector offers Ollama (local dropdown) plus hosted providers:

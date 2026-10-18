@@ -129,6 +129,11 @@ What it gives you over the CLI:
 - **Filtered scope.** `Label | folder | extensions` per folder; blank means all.
 - **Live progress.** The progress bar and log stream from the worker thread,
   so the window never freezes and you can watch files/chunks go by.
+- **Jobs queue.** Starting a step while another runs queues it instead of
+  locking the window, so you can switch RAG projects and line up the next job
+  during a long embed. A job binds its table/model when started, and a result
+  that lands after a project switch is logged, not pasted into the wrong
+  project.
 - **Ollama status.** A dot in the status bar shows whether the daemon is
   reachable and populates the model dropdown from the *embedding* models you
   actually have installed.

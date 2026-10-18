@@ -73,6 +73,8 @@ _SETTINGS_DEFAULTS = {
     "rag_enabled": "1",
     "rag_min_cos": "0.30",
     "hybrid_search": "1",
+    "vector_nprobes": "0",
+    "vector_refine_factor": "0",
     "backup_include_keys": "0",
     "opencode_cmd": "opencode",
     "commandcode_cmd": "command-code",

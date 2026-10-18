@@ -176,6 +176,14 @@ the corpus contributed.
     the Chat model box.
   Stored in `app.db` as plaintext — fine for a local single-user machine, do
   not share the file. API keys are **excluded from backups by default**.
+- **Vector index**: **nprobes** / **refine factor** (`0` = LanceDB default;
+  applied live, no Save needed) and **Build / refresh indexes**, which compacts
+  fragments, rebuilds the FTS index and adds a BTREE on `source` for the
+  current project's table — safe and quick. Tick **also build ANN (IVF_PQ)** to
+  add a vector (ANN) index; it is lossy and rarely beats exact search below
+  ~20k vectors, so the app asks first. `nprobes` / `refine` only take effect
+  once that index exists. Run **Stats** any time to see fragments and which
+  indexes a table has.
 - **Backup / Transfer**:
   - **Full bundle (.zip)** — `app.db` + `index/` (all vector tables +
     `weights.json`) + `staging/`, with a `manifest.json` (version, counts,

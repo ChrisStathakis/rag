@@ -1,8 +1,8 @@
 # Commands
 
-`pipeline.py` exposes six subcommands. The normal flow is
-`ingest` → `embed` → `query`, with `stats` / `eval` / `reindex` for
-inspection and comparison.
+`pipeline.py` exposes these subcommands. The normal flow is
+`ingest` → `embed` → `query`, with `index` / `stats` / `eval` / `reindex` for
+maintenance, inspection and comparison.
 
 ```powershell
 .\.venv\Scripts\python.exe pipeline.py <command> [options]
@@ -46,7 +46,8 @@ without re-parsing the corpus.
 
 Batch-embed every row where `embedded=0`. Auto-pulls the model if missing.
 **Resumable** — rerun it after an interruption and it continues from where it
-left off (already-embedded rows are skipped).
+left off (already-embedded rows are skipped). It also (re)builds the FTS index
+and compacts the table once it has piled up more than 24 fragments.
 
 | Flag | Meaning |
 |------|---------|
@@ -76,6 +77,8 @@ Rank Fusion (RRF).
 | `--width` | Characters of each hit to print (default 220). |
 | `--hybrid` | Explicitly select hybrid (the default). |
 | `--no-hybrid` | Vector-only; skip the FTS/RRF half. |
+| `--nprobes` | IVF partitions to scan (`0` = LanceDB default). Only matters after `index --ann`. |
+| `--refine` | Exact re-scoring factor to recover ANN recall (`0` = off). |
 
 See [Hybrid Search](hybrid-search.md) for when to use which mode and how
 fusion works.
@@ -91,8 +94,9 @@ fusion works.
 
 ## stats
 
-Index statistics: row counts by kind / model / dims, token totals, on-disk
-size. Shows every table in the index.
+Index statistics: row counts by kind / model / dims, token totals, fragment
+count, the indexes present, and on-disk size. Shows every table in the index.
+Also flags tables that are not fully embedded and tables that have fragmented.
 
 | Flag | Meaning |
 |------|---------|
@@ -101,6 +105,64 @@ size. Shows every table in the index.
 ```powershell
 .\.venv\Scripts\python.exe pipeline.py stats -v
 ```
+
+!!! info "Reading the health lines"
+    `fragments` above `24` prints a hint to compact, and `indices: none`
+    prints a hint to build them. Both are what `index` fixes.
+
+## index
+
+Build/refresh a table's indexes and compact it. Safe to re-run at any time.
+
+**By default** it does three things per table:
+
+1. **Compacts** fragments (`optimize`) — every `ingest --append`, `embed`
+   checkpoint and `delete` writes a new fragment; hundreds of them slow scans
+   and hurt index training. `embed` also auto-compacts when a table passes 24
+   fragments, so this is mostly a manual "do it now" button.
+2. **Rebuilds the full-text (BM25) index** on `text_raw` — the keyword half of
+   hybrid search.
+3. **Adds a BTREE scalar index on `source`** — speeds up `delete` and label
+   filters.
+
+Optionally (`--ann`) it also builds a **vector (ANN) index**. That one is
+**opt-in on purpose**: LanceDB uses exact (brute-force) search by default, and
+below ~20 000 vectors exact search is *both* faster **and** perfectly accurate.
+IVF_PQ is lossy — it needs `--refine` at query time to get recall back.
+
+| Flag | Meaning |
+|------|---------|
+| `--table` | One table (default: every table). |
+| `--ann` | Also build a vector (ANN) index. |
+| `--type` | ANN type: `IVF_PQ` (default), `IVF_HNSW_SQ`, `IVF_SQ`, … |
+| `--sub-vectors` | IVF_PQ sub-vectors; must divide the vector dim (0 = auto). |
+| `--force` | Build the ANN index even on a small table. |
+| `--no-compact` | Skip compaction. |
+| `--no-fts` | Skip the FTS index. |
+| `--no-scalar` | Skip the BTREE index on `source`. |
+
+```powershell
+# safe, quick: compact + FTS + source index for every table
+.\.venv\Scripts\python.exe pipeline.py index
+
+# one table
+.\.venv\Scripts\python.exe pipeline.py index --table corpus
+
+# add an ANN vector index (only worth it for big tables) and tune at query time
+.\.venv\Scripts\python.exe pipeline.py index --table corpus --ann --sub-vectors 64
+.\.venv\Scripts\python.exe pipeline.py query "your question" --table corpus --nprobes 32 --refine 4
+```
+
+Output shows `indices before` / `indices after` and the fragment count on each
+side, e.g. `BTree(source), FTS(text_raw), IvfPq(vector)`.
+
+!!! warning "ANN is a trade, not a free win"
+    `IVF_PQ` quantizes vectors (smaller and faster, **approximate**).
+    `IVF_HNSW_SQ` keeps recall closer to exact at a larger size. Either way,
+    compare with `eval` before and after — if nDCG drops, raise `--refine` or
+    drop the index (`--no-compact` won't remove it; rebuild the table or leave
+    it and query with exact distances). On the 4 GB card, exact search over a
+    few 10 000 chunks is fast enough that most corpora never need this.
 
 ## eval
 

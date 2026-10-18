@@ -80,8 +80,9 @@ rag_min_cos`, default `0.30`). Two nuances:
 | FTS returns `[]` but hybrid on | CLI still fuses (no-op); app takes vector top-`k` directly. Same ordering either way. |
 
 Restore full hybrid by rerunning `embed` on that table — it rebuilds the FTS
-index at the end (`_ensure_fts_index`, `replace=True`). The FTS index is
-never rebuilt per query (too expensive).
+index at the end (`_ensure_fts_index`, `replace=True`) — or run
+`pipeline.py index --table <name>`, which rebuilds it explicitly along with the
+BTREE on `source`. The FTS index is never rebuilt per query (too expensive).
 
 ## Folder weights
 
@@ -105,7 +106,9 @@ queries are keyword-heavy and hybrid should stay on.
 
 - **Hybrid looks identical to vector-only.** The FTS index is probably missing
   (table built before FTS, or index build failed). Rerun `embed` — it rebuilds
-  the index — and watch for `FTS index not built (...)` in the log.
+  the index — or run `pipeline.py index --table <name>`, and watch for
+  `FTS index not built (...)` in the log. `stats` prints `indices: none` when
+  none exist.
 - **Keyword junk outranks good semantic hits.** Lower the influence of BM25 by
   searching vector-only, or raise the folder weight of the authoritative source.
 - **Model mismatch errors.** Unrelated to hybrid: vectors from different models

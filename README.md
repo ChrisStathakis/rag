@@ -59,7 +59,8 @@ test before pointing it at your real documents:
 | `ingest` | walk a folder, extract text, chunk it, store text + metadata (no vectors). `--dry-run` previews one chunk. `--only .md,.pdf,.py` filters extensions. |
 | `embed`  | batch-embed every row where `embedded=0`. Auto-pulls the model if missing. Resumable — rerun it after an interruption and it continues. |
 | `query`  | hybrid search (vector + FTS/RRF). Refuses to run if the requested model does not match the index. |
-| `stats`  | chunk counts by kind/model/dims, token totals, on-disk size. |
+| `stats`  | chunk counts by kind/model/dims, token totals, fragment count, indexes present, on-disk size. |
+| `index`  | compact fragments, rebuild the FTS index and add a BTREE on `source`; `--ann` also builds a vector (ANN) index. |
 | `eval`   | run a query set over one or more tables, print nDCG@10 + HitRate. `--gold` CSV enables scoring. |
 | `reindex`| build a fresh table for a *different* model (copies text + metadata, drops vectors, probes new dims). |
 | `delete` | remove one source (a file, or a whole folder/label prefix) from a table and rebuild its keyword index. `--source` repeats. |
@@ -100,7 +101,7 @@ are skipped and logged, never raised.
 ```
 extract.py    5 format handlers -> common Block(text, section, meta)
 chunking.py   prose splitter + structural code splitter -> Chunk
-pipeline.py   CLI: ingest / embed / query / stats / eval / reindex / delete / saved / export-md
+pipeline.py   CLI: ingest / embed / query / index / stats / eval / reindex / delete / saved / export-md
 store.py      SQLite project store (settings only, no vectors)
 backup.py     backup/restore: full bundle (.zip) or single-project package (.zip)
 chat_providers.py  hosted chat backends (Anthropic/OpenAI/OpenCode/The Grid/custom)

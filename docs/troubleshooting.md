@@ -91,6 +91,32 @@ Append / Rebuild / Cancel when the table exists).
 - Boosted hits print `w=…` next to `cos=`. No marker means weight `1.0` (or an
   FTS-only hit, which carries no cosine to scale).
 
+## Search is slow, or a table looks "half built"
+
+`pipeline.py stats` (or **Stats** in the app) now prints three extra lines per
+table — `fragments`, `indices` and `state`:
+
+- **`fragments` > 24** — the table has piled up fragments from many small
+  appends. Scans get slower and index training gets worse. Fix:
+  `python pipeline.py index --table <name>` (or **4 · Settings → Build /
+  refresh indexes**). `embed` also auto-compacts past this threshold.
+- **`indices: none`** — no FTS index, so hybrid search silently falls back to
+  vector-only. Fix: the same `index` command.
+- **`state: N row(s) not embedded`** — ingestion succeeded but `embed` did not
+  finish. Fix: `python pipeline.py embed --table <name>` — it resumes.
+
+## Why is there no vector (ANN) index?
+
+Because exact search is usually better here. LanceDB's default is brute-force
+cosine over every vector; on a 4 GB card a few 10 000 chunks is milliseconds and
+recall is 100%. An ANN index (`IVF_PQ`) is *approximate* — it trades recall for
+scale. `index --ann` builds one (and the GUI asks first), but below ~20 000
+vectors it is rarely worth it. If you do build one, keep `refine` at query time
+(e.g. `--refine 4`) and A/B it with `eval` to confirm recall held.
+
+`nprobes` / `refine factor` in **Settings** are ignored until an ANN index
+exists — that is expected, not a bug.
+
 ## Chat has no model
 
 The provider selector offers Ollama (local dropdown) plus hosted providers:

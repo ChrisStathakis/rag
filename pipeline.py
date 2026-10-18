@@ -6,6 +6,7 @@ Subcommands
              (--append adds to an existing table, deduped by source)
     embed    batch-embed pending rows into vectors
     query    hybrid (FTS + vector, RRF) search over an index
+    index    build/refresh indexes (FTS, BTREE, optional ANN) + compact
     stats    chunk counts by format / model / dims + on-disk size
     eval     run a CSV of queries against several tables, print a comparison
     reindex  build a new table for a different model, copying metadata
@@ -74,6 +75,10 @@ CHUNK_MIN = 50
 CODE_MAX = 600
 
 DEFAULT_ENV = {"OLLAMA_KV_CACHE_TYPE": "q8_0"}
+
+# Vector-index maintenance
+COMPACT_FRAGMENT_THRESHOLD = 24     # `embed` auto-compacts above this many fragments
+ANN_MIN_ROWS = 20_000               # below this, ANN is slower *and* less exact
 
 
 def _ensure_env() -> None:
@@ -735,6 +740,7 @@ def cmd_embed(args) -> None:
     if not todo:
         log(f"table '{name}' is fully embedded ({len(rows)} rows, model={meta.get('model_tag')})")
         _ensure_fts_index(table)
+        _maybe_compact(table, name)
         return {"embedded": 0, "dims": meta.get("dims"),
                 "model": meta.get("model_tag"), "table": name,
                 "truncations": 0}
@@ -865,6 +871,7 @@ def cmd_embed(args) -> None:
     flushed = len(updated)
     log(f"\nembedded {len(updated)} rows -> dims={dims} model={model}")
     _ensure_fts_index(table)
+    _maybe_compact(table, name)
     if truncations:
         log(f"WARNING: {truncations} rows exceed num_ctx={NUM_CTX}; they were "
             f"skipped before sending (truncate=False) -- inspect with --verbose")
@@ -935,12 +942,9 @@ def cmd_query(args) -> None:
 
     k = args.top_k
     try:
-        # cosine always: the embedding model emits normalized vectors, so cosine
-        # is the correct similarity. Using LanceDB's default (L2) would both
-        # re-rank differently and make the displayed `cos=` meaningless.
-        res = (table.search(vec, vector_column_name="vector")
-               .metric("cosine").limit(k * 3))          # .metric(), not a kwarg
-        hits = res.to_list()
+        hits = vector_search(table, vec, k * 3,
+                             nprobes=int(getattr(args, "nprobes", 0) or 0),
+                             refine=int(getattr(args, "refine", 0) or 0))
     except Exception as e:
         # fall back to pure vector search if the metric/query form is rejected
         try:
@@ -1027,6 +1031,171 @@ def _rrf(result_sets: list[list[dict]], k: int, rr: int = 60) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# vector index / maintenance
+# --------------------------------------------------------------------------- #
+
+def vector_search(table, vec, k: int, *, nprobes: int = 0,
+                  refine: int = 0) -> list[dict]:
+    """Cosine vector search, optionally tuned for an ANN index.
+
+    Cosine is always used: the embedding model emits normalized vectors, so
+    cosine is the right similarity, and LanceDB's default (L2) would re-rank
+    differently and make the displayed `cos=` meaningless.
+
+    `nprobes` / `refine_factor` only matter once a vector index exists --
+    LanceDB silently ignores them on an unindexed table, so they are safe to
+    pass unconditionally:
+      - nprobes   -- IVF partitions to scan (higher = better recall, slower)
+      - refine    -- re-score `refine * k` candidates with exact distances,
+                     recovering the recall IVF_PQ quantization costs.
+    """
+    q = table.search(vec, vector_column_name="vector").metric("cosine")
+    if nprobes and nprobes > 0:
+        try:
+            q = q.nprobes(int(nprobes))
+        except Exception:                                # noqa: BLE001
+            pass
+    if refine and refine > 0:
+        try:
+            q = q.refine_factor(int(refine))
+        except Exception:                                # noqa: BLE001
+            pass
+    return q.limit(k).to_list()
+
+
+def _index_health(table) -> dict:
+    """Physical state of a table: rows, fragments, and indexes present."""
+    info: dict = {"rows": None, "fragments": None, "indices": []}
+    try:
+        info["rows"] = table.count_rows()
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        info["fragments"] = len(table.to_lance().get_fragments())
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        for i in table.list_indices():
+            info["indices"].append({
+                "name": getattr(i, "name", "") or "",
+                "type": getattr(i, "index_type", "") or "",
+                "columns": list(getattr(i, "columns", None) or []),
+            })
+    except Exception:                                    # noqa: BLE001
+        pass
+    return info
+
+
+def _fmt_indices(info: dict) -> str:
+    """`IvfPq(vector), FTS(text_raw), BTree(source)` -- or `none`."""
+    if not info.get("indices"):
+        return "none"
+    parts = []
+    for i in info["indices"]:
+        cols = "+".join(i.get("columns") or []) or i.get("name") or "?"
+        parts.append(f"{i.get('type') or 'INDEX'}({cols})")
+    return ", ".join(parts)
+
+
+def _optimize_table(table) -> bool:
+    """Compact fragments and prune old versions. True on success."""
+    try:
+        table.optimize()
+        return True
+    except Exception as e:                               # noqa: BLE001
+        log(f"  optimize failed ({e})")
+        return False
+
+
+def _maybe_compact(table, name: str) -> None:
+    """Compact only when a table piled up fragments from small appends.
+
+    Every `add`/`merge` writes a new fragment; hundreds of them slow scans
+    and hurt index training. Cheap to check, deliberate to fix.
+    """
+    try:
+        nfrag = len(table.to_lance().get_fragments())
+    except Exception:                                    # noqa: BLE001
+        return
+    if nfrag <= COMPACT_FRAGMENT_THRESHOLD:
+        return
+    log(f"  '{name}' has {nfrag} fragments -> compacting")
+    _optimize_table(table)
+
+
+def cmd_index(args) -> dict:
+    """Build/refresh indexes and compact a table.
+
+    FTS, a BTREE on `source` and compaction are applied by default -- they
+    are safe and only help. The vector (ANN) index is opt-in via `--ann`
+    because below ~ANN_MIN_ROWS vectors exact search is *both* faster and
+    perfectly accurate (IVF_PQ is lossy).
+    """
+    db = _db()
+    names = [args.table] if getattr(args, "table", None) else _table_names(db)
+    if not names:
+        log(f"index empty: {INDEX_DIR}")
+        return {}
+
+    summary = []
+    for n in names:
+        table = db.open_table(n)
+        before = _index_health(table)
+        rows = before["rows"] or 0
+        log(f"\ntable '{n}': rows={rows} fragments={before['fragments']}")
+        log(f"  indices before: {_fmt_indices(before)}")
+
+        # 1) compact first -- index training reads fragments
+        if not args.no_compact:
+            _optimize_table(table)
+
+        # 2) full-text index (the keyword half of hybrid search)
+        if not args.no_fts:
+            _ensure_fts_index(table)
+
+        # 3) scalar index -> fast deletes / label filters
+        if not args.no_scalar:
+            try:
+                table.create_scalar_index("source", replace=True)
+            except Exception as e:                       # noqa: BLE001
+                log(f"  scalar index on 'source' skipped ({e})")
+
+        # 4) vector (ANN) index -- opt-in, rarely worth it when small
+        if args.ann:
+            if rows and rows < ANN_MIN_ROWS and not args.force:
+                log(f"  ANN skipped: {rows} rows < {ANN_MIN_ROWS}. Exact search "
+                    "is faster and perfectly accurate at this size; pass "
+                    "--force to build it anyway.")
+            else:
+                kw = {"metric": "cosine", "index_type": args.type,
+                      "replace": True}
+                if args.sub_vectors:
+                    kw["num_sub_vectors"] = args.sub_vectors
+                try:
+                    table.create_index(**kw)
+                    log(f"  ANN index built ({args.type})")
+                except Exception as e:                   # noqa: BLE001
+                    log(f"  ANN index failed ({e})")
+        else:
+            log("  vector index: not requested (--ann to build one)")
+
+        after = _index_health(table)
+        log(f"  indices after: {_fmt_indices(after)}  "
+            f"fragments={after['fragments']}")
+        summary.append({"table": n, "rows": rows,
+                        "before_fragments": before["fragments"],
+                        "after_fragments": after["fragments"],
+                        "indices": [i["type"] for i in after["indices"]]})
+
+    log("")
+    for s in summary:
+        log(f"  {s['table']}: {s['rows']} rows, fragments "
+            f"{s['before_fragments']} -> {s['after_fragments']}, indices: "
+            f"{', '.join(s['indices']) or 'none'}")
+    return {"index": summary}
+
+
+# --------------------------------------------------------------------------- #
 # stats
 # --------------------------------------------------------------------------- #
 
@@ -1066,6 +1235,19 @@ def cmd_stats(args) -> None:
         log(f"vectors    : {vec_bytes / 1e6:.1f} MB as float32"
             + (f" / {embedded * d:.0f} KB as int8" if isinstance(d, int) else ""))
         log(f"sources    : {len(by_source)} files")
+        health = _index_health(t)
+        nfrag = health["fragments"]
+        log(f"fragments  : {nfrag}" + (
+            f"  (fragmented -- run: python pipeline.py index)"
+            if isinstance(nfrag, int) and nfrag > COMPACT_FRAGMENT_THRESHOLD
+            else ""))
+        if health["indices"]:
+            log(f"indices    : {_fmt_indices(health)}")
+        else:
+            log("indices    : none -- run: python pipeline.py index")
+        if embedded < len(rows):
+            log(f"state      : {len(rows) - embedded} row(s) not embedded -- "
+                f"run: python pipeline.py embed --table {n}")
         if args.verbose:
             for s, c in by_source.most_common(25):
                 log(f"    {c:5d}  {s}")
@@ -1504,6 +1686,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--model", default=None)
     g.add_argument("--top-k", type=int, default=8)
     g.add_argument("--width", type=int, default=220, help="chars of each hit to print")
+    g.add_argument("--nprobes", type=int, default=0,
+                   help="ANN partitions to scan (0 = LanceDB default); only "
+                        "matters once `index --ann` has run")
+    g.add_argument("--refine", type=int, default=0,
+                   help="exact re-scoring factor for ANN recall (0 = off)")
     g.add_argument("--hybrid", dest="hybrid", action="store_true",
                    help="hybrid vector + FTS/RRF (default)")
     g.add_argument("--no-hybrid", dest="hybrid", action="store_false",
@@ -1513,6 +1700,25 @@ def build_parser() -> argparse.ArgumentParser:
     g = sub.add_parser("stats", help="index statistics")
     g.add_argument("-v", "--verbose", action="store_true", help="per-file chunk counts")
     g.set_defaults(func=cmd_stats)
+
+    g = sub.add_parser("index", help="build/refresh indexes + compact a table")
+    g.add_argument("--table", default=None, help="one table (default: all)")
+    g.add_argument("--ann", action="store_true",
+                   help="also build a vector (ANN) index -- rarely worth it "
+                        f"below ~{ANN_MIN_ROWS} rows")
+    g.add_argument("--type", default="IVF_PQ",
+                   help="ANN index type: IVF_PQ (default), IVF_HNSW_SQ, "
+                        "IVF_SQ, ...")
+    g.add_argument("--sub-vectors", type=int, default=0,
+                   help="IVF_PQ sub-vectors; must divide the vector dim "
+                        "(0 = auto)")
+    g.add_argument("--force", action="store_true",
+                   help="build the ANN index even on a small table")
+    g.add_argument("--no-compact", action="store_true", help="skip compaction")
+    g.add_argument("--no-fts", action="store_true", help="skip the FTS index")
+    g.add_argument("--no-scalar", action="store_true",
+                   help="skip the BTREE index on `source`")
+    g.set_defaults(func=cmd_index)
 
     g = sub.add_parser("eval", help="compare tables over a query set")
     g.add_argument("--queries", required=True, help="txt/csv, one query per line (or col 0)")

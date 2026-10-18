@@ -1083,6 +1083,45 @@ class App(ctk.CTk):
                         ).grid(row=r, column=0, columnspan=4, sticky="w",
                                padx=PAD); r += 1
 
+        ctk.CTkLabel(wrap, text="Vector index",
+                     font=(FONT[0], 14, "bold")
+                     ).grid(row=r, column=0, columnspan=4, sticky="w",
+                            padx=PAD, pady=(10, 2)); r += 1
+        ctk.CTkLabel(wrap, text="nprobes").grid(row=r, column=0, sticky="w",
+                                               padx=PAD)
+        ctk.CTkEntry(wrap, textvariable=var("vector_nprobes", "0"), width=64
+                     ).grid(row=r, column=1, sticky="w")
+        ctk.CTkLabel(wrap, text="refine factor").grid(row=r, column=2,
+                                                      sticky="w")
+        ctk.CTkEntry(wrap, textvariable=var("vector_refine_factor", "0"),
+                     width=64).grid(row=r, column=3, sticky="w", padx=(0, PAD))
+        r += 1
+        ctk.CTkLabel(wrap, text="0 = LanceDB default. Both are ignored until an "
+                                "ANN vector index exists.",
+                     text_color=("gray45", "gray65"), anchor="w"
+                     ).grid(row=r, column=0, columnspan=4, sticky="w",
+                            padx=PAD); r += 1
+        self.ann_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(wrap, text="also build ANN (IVF_PQ)",
+                        variable=self.ann_var
+                        ).grid(row=r, column=0, columnspan=2, sticky="w",
+                               padx=PAD)
+        self.btn_index = ctk.CTkButton(
+            wrap, text="Build / refresh indexes", width=180,
+            fg_color="transparent", border_width=1,
+            command=self.do_index_health)
+        self.btn_index.grid(row=r, column=2, columnspan=2, sticky="w",
+                            padx=(0, PAD))
+        r += 1
+        ctk.CTkLabel(wrap, text="Rebuilds the FTS + source indexes and compacts "
+                                "fragments (safe and quick). ANN is lossy, needs "
+                                "reseeding, and rarely beats exact search below "
+                                "~20k vectors.",
+                     text_color=("gray45", "gray65"), anchor="w",
+                     justify="left", wraplength=760
+                     ).grid(row=r, column=0, columnspan=4, sticky="w",
+                            padx=PAD); r += 1
+
         ctk.CTkLabel(wrap, text="Terminal agents",
                      font=(FONT[0], 14, "bold")
                      ).grid(row=r, column=0, columnspan=4, sticky="w",
@@ -1362,14 +1401,48 @@ class App(ctk.CTk):
         table = self.table_var.get().strip()
         self._save_ui_weights(table)
         self._say(f"query: {q!r}")
+        nprobes, refine = self._tuning_live()
         self.runner.run("query", _search, q, topk,
                         table=table,
                         model=self.model_var.get(),
-                        hybrid=bool(self.hybrid_var.get()))
+                        hybrid=bool(self.hybrid_var.get()),
+                        nprobes=nprobes, refine=refine)
 
     def do_stats(self) -> None:
         self._say("stats")
         self.runner.run("stats", _stats)
+
+    def do_index_health(self) -> None:
+        """Rebuild FTS/scalar indexes + compact, optionally adding ANN."""
+        table = self.table_var.get().strip()
+        ann = bool(self.ann_var.get())
+        if ann and not messagebox.askyesno(
+                "Build vector index",
+                "Also build an ANN (IVF_PQ) vector index?\n\n"
+                "It is lossy and usually slower than exact search on small "
+                "tables, and building it can take a while. Exact search keeps "
+                "working until it exists, and nprobes/refine only take effect "
+                "afterwards."):
+            ann = False
+        self._say(f"index: table '{table or '(all)'}'"
+                  + (" + ANN" if ann else ""))
+        self.runner.run("index", _index_job, table, ann)
+
+    def _tuning_live(self) -> tuple[int, int]:
+        """(nprobes, refine) from the Settings boxes as typed, no Save needed.
+
+        Empty or junk falls back to the saved values, then to 0. Both are
+        ignored by LanceDB until an ANN vector index exists.
+        """
+        def _int(key: str, fallback: int) -> int:
+            try:
+                raw = self.sv[key].get().strip()
+                return max(0, int(raw)) if raw else fallback
+            except (KeyError, ValueError, AttributeError):
+                return fallback
+        saved = _index_tuning()
+        return (_int("vector_nprobes", saved[0]),
+                _int("vector_refine_factor", saved[1]))
 
     def do_reindex(self) -> None:
         src = self.table_var.get().strip()
@@ -1613,10 +1686,12 @@ class App(ctk.CTk):
         self.last_query = q
         self._say(f"chat: {q!r} [{provider}/{chat_model}]")
         self._start_pending(f"working ({chat_model})")
+        nprobes, refine = self._tuning_live()
         self.runner.run("chat", _chat, q, topk, table,
                         self.model_var.get(), provider, chat_model, api_key,
                         list(self.conversation), rag_enabled, min_cos,
-                        bool(self.hybrid_var.get()), base_url)
+                        bool(self.hybrid_var.get()), base_url,
+                        nprobes, refine)
 
     def _agent_question(self) -> str:
         """Question for terminal agents: box text, else last chat question."""
@@ -2896,7 +2971,7 @@ class App(ctk.CTk):
                      "btn_new_project", "btn_rename_project",
                      "btn_delete_project", "btn_backup_zip", "btn_restore_zip",
                      "btn_backup_json", "btn_restore_json",
-                     "btn_export_project", "btn_import_project"):
+                     "btn_export_project", "btn_import_project", "btn_index"):
             btn = getattr(self, name, None)
             if btn is None:
                 continue
@@ -3093,6 +3168,14 @@ class App(ctk.CTk):
                 self._say(f"✓ sync complete — {result.get('chunks', 0)} new "
                           f"chunk(s), {result.get('embedded', 0)} embedded")
                 self.btn_embed.configure(state="normal")
+            elif "index" in result:
+                rows = result.get("index") or []
+                self._say(f"✓ index maintenance done — {len(rows)} table(s)")
+                for s in rows:
+                    self._say(f"    {s.get('table')}: fragments "
+                              f"{s.get('before_fragments')} -> "
+                              f"{s.get('after_fragments')}, indices: "
+                              f"{', '.join(s.get('indices') or []) or 'none'}")
             elif "deleted_chunks" in result:
                 self._say(f"✓ deleted {result.get('deleted_chunks', 0)} chunk(s) "
                           f"({result.get('before')} -> {result.get('after')})")
@@ -3251,13 +3334,30 @@ def _call(fn, kwargs: dict):
     return fn(_Args(**kwargs))
 
 
+def _index_tuning() -> tuple[int, int]:
+    """(nprobes, refine_factor) from Settings, tolerant of junk values.
+
+    Both are 0 (off) by default; they only do anything once an ANN vector
+    index exists, and LanceDB ignores them otherwise.
+    """
+    def _int(key: str) -> int:
+        try:
+            return max(0, int(store.get_setting(DB_PATH, key, "0") or 0))
+        except (TypeError, ValueError):
+            return 0
+    return _int("vector_nprobes"), _int("vector_refine_factor")
+
+
 def _retrieve(q: str, topk: int, table: str, model: str,
-               hybrid: bool = True):
+               hybrid: bool = True, *, nprobes: int | None = None,
+               refine: int | None = None):
     """Shared retrieval for Search and Ask: guards, embed, cosine search,
     folder weights, FTS/RRF fusion. Returns (hits, meta, model_used).
 
     hybrid=False skips the FTS half entirely (vector-only), so exact-term
     misses and missing FTS indexes behave identically: pure cosine ranking.
+    `nprobes`/`refine` default to the saved Settings values; callers that
+    have live widgets pass them explicitly.
     """
     table_obj = P._open_table(table)
     meta = P._meta_of(table_obj)
@@ -3273,11 +3373,15 @@ def _retrieve(q: str, topk: int, table: str, model: str,
     client = P._client()
     vec, _ = P.embed_one(client, model, P.QUERY_INSTRUCT + q)
     k = max(topk, 1)
-    # NB: `Table.search()` ignores a metric= keyword -- it must be set via
-    # .metric(), otherwise LanceDB falls back to L2 (or the table default) and
-    # the reported similarity is wrong.
-    hits = (table_obj.search(vec, vector_column_name="vector")
-            .metric("cosine").limit(k * 3).to_list())
+    # P.vector_search centralizes the cosine metric (NB: `Table.search()`
+    # ignores a metric= kwarg -- it must go through .metric(), or LanceDB
+    # falls back to L2 and the reported similarity is wrong) plus the optional
+    # ANN knobs. nprobes/refine are no-ops until `index --ann` built a vector
+    # index, so exact search is unchanged by default.
+    if nprobes is None and refine is None:
+        nprobes, refine = _index_tuning()
+    hits = P.vector_search(table_obj, vec, k * 3,
+                           nprobes=nprobes or 0, refine=refine or 0)
     # folder importance, same rule as the CLI: live weights file, no re-ingest
     hits = P.apply_weights(hits, P.load_weights(table))
     # NOTE: no FTS-index rebuild here on purpose -- `embed` already builds it,
@@ -3299,9 +3403,11 @@ def _fetch_job(url: str, staging: str) -> dict:
 
 
 def _search(q: str, topk: int, table: str, model: str,
-             hybrid: bool = True) -> dict:
+             hybrid: bool = True, nprobes: int = 0,
+             refine: int = 0) -> dict:
     """Hybrid search. Returns hits for card rendering (one log summary)."""
-    hits, meta, model = _retrieve(q, topk, table, model, hybrid)
+    hits, meta, model = _retrieve(q, topk, table, model, hybrid,
+                                  nprobes=nprobes, refine=refine)
     mode = "hybrid" if hybrid else "vector"
     P.log(f"query: {q!r} -> {len(hits)} hits (cards below, mode={mode})")
     return {"query": q, "hits": hits, "topk": max(topk, 1),
@@ -3366,7 +3472,7 @@ def _chat(q: str, topk: int, table: str, embed_model: str,
           provider: str, chat_model: str, api_key: str = "",
           history: list | None = None, rag_enabled: bool = True,
           min_cos: float = 0.30, hybrid: bool = True,
-          base_url: str = "") -> dict:
+          base_url: str = "", nprobes: int = 0, refine: int = 0) -> dict:
     """One turn of the conversation. LLM-first, RAG is a silent helper.
 
     Retrieval is attempted quietly; only hits with cosine >= min_cos are
@@ -3389,7 +3495,9 @@ def _chat(q: str, topk: int, table: str, embed_model: str,
         BUS.put("chat_stage", "searching corpus")
         try:
             hits, _meta, embed_model = _retrieve(q, min(max(topk, 1), 8),
-                                                 table, embed_model, hybrid)
+                                                 table, embed_model, hybrid,
+                                                 nprobes=nprobes,
+                                                 refine=refine)
         except Exception as e:                          # noqa: BLE001
             P.log(f"chat: no corpus context ({e}) -- answering without it")
             hits = []
@@ -3510,6 +3618,17 @@ def _stats() -> None:
     # cmd_stats logs through pipeline.log(), which the Runner already routes
     # to the UI -- no stdout capture needed.
     P.cmd_stats(_Args(verbose=False))
+
+
+def _index_job(table: str, ann: bool) -> dict:
+    """Worker for the Vector-index button: maintenance for one table.
+
+    `ann` is an explicit opt-in, so it also sets `force` -- the user has been
+    told it is lossy and chose it anyway.
+    """
+    return P.cmd_index(_Args(table=table or None, ann=bool(ann),
+                             type="IVF_PQ", sub_vectors=0, force=bool(ann),
+                             no_compact=False, no_fts=False, no_scalar=False))
 
 
 def main() -> None:

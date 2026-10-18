@@ -63,7 +63,7 @@ Then point it at your own corpus:
 
 - [Install](install.md) — requirements, Ollama, smoke test
 - [Desktop App](gui.md) — the CustomTkinter window and multi-folder workflow
-- [Commands](commands.md) — the six subcommands and their flags
+- [Commands](commands.md) — every subcommand and its flags
 - [Hybrid Search](hybrid-search.md) — vector + BM25 fusion, when to use each mode
 - [Extractors & Chunking](extractors.md) — how each format is parsed and split
 - [Schema & Config](schema.md) — the LanceDB columns, guards, and hardware settings
